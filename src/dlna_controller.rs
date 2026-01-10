@@ -1,9 +1,9 @@
-use rupnp::ssdp::{SearchTarget, URN};
-use rupnp::Device;
-use std::time::Duration;
-use reqwest::Client;
-use std::net::IpAddr;
 use futures::stream::StreamExt;
+use reqwest::Client;
+use rupnp::Device;
+use rupnp::ssdp::{SearchTarget, URN};
+use std::net::IpAddr;
+use std::time::Duration;
 
 // AVTransport服务URN
 const AV_TRANSPORT: URN = URN::service("schemas-upnp-org", "AVTransport", 1);
@@ -33,14 +33,10 @@ impl DlnaController {
     // 发现网络中的DLNA渲染器设备
     pub async fn discover_devices(&self) -> Result<Vec<DlnaDevice>, rupnp::Error> {
         println!("正在搜索DLNA设备...");
-        
+
         // 使用正确的SearchTarget构造方法 - 搜索AVTransport服务
         let search_target = SearchTarget::URN(AV_TRANSPORT);
-        let devices_stream = rupnp::discover(
-            &search_target,
-            Duration::from_secs(5),
-            None,
-        ).await?;
+        let devices_stream = rupnp::discover(&search_target, Duration::from_secs(5), None).await?;
 
         // 将Stream转换为Vec
         let devices: Vec<Result<Device, rupnp::Error>> = devices_stream.collect().await;
@@ -55,9 +51,10 @@ impl DlnaController {
                     if device_type_str.contains("MediaRenderer") {
                         let friendly_name = device.friendly_name().to_string();
                         let location = device.url().to_string();
-                        
+
                         // 检查设备是否支持AVTransport服务
-                        let services: Vec<URN> = device.services()
+                        let services: Vec<URN> = device
+                            .services()
                             .iter()
                             .map(|s| s.service_type().clone())
                             .collect();
@@ -84,7 +81,9 @@ impl DlnaController {
 
     // 获取设备的AVTransport服务
     fn get_avtransport_service<'a>(&'a self, device: &'a DlnaDevice) -> Option<&'a rupnp::Service> {
-        device.device.services()
+        device
+            .device
+            .services()
             .iter()
             .find(|s| *s.service_type() == AV_TRANSPORT)
     }
@@ -98,32 +97,40 @@ impl DlnaController {
         server_ip: IpAddr,
         server_port: u16,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let avtransport = self.get_avtransport_service(device)
+        let avtransport = self
+            .get_avtransport_service(device)
             .ok_or("设备不支持AVTransport服务")?;
 
         // 构建完整的媒体URL
         let media_url = format!("http://{}:{}{}", server_ip, server_port, current_uri);
-        
+
         println!("设置媒体URI: {}", media_url);
         println!("元数据: {}", current_uri_metadata);
 
         // 准备SOAP请求参数
         let action = "SetAVTransportURI";
-        let args_str = "InstanceID=0&CurrentURI=".to_string() + &urlencoding::encode(&media_url) + 
-                      "&CurrentURIMetaData=" + &urlencoding::encode(current_uri_metadata);
+        let args_str = format!(
+            r#"
+            <InstanceID>0</InstanceID>
+            <CurrentURI>{}</CurrentURI>
+            <CurrentURIMetaData>{}</CurrentURIMetaData>
+            "#,
+            media_url, current_uri_metadata
+        );
 
         // 发送SOAP请求 - 使用device.url()而不是service.url()
         let device_url = device.device.url();
         let response = avtransport.action(device_url, action, &args_str).await?;
-        
+
         println!("SetAVTransportURI响应: {:?}", response);
-        
+
         Ok(())
     }
 
     // 播放媒体
     pub async fn play(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
-        let avtransport = self.get_avtransport_service(device)
+        let avtransport = self
+            .get_avtransport_service(device)
             .ok_or("设备不支持AVTransport服务")?;
 
         let action = "Play";
@@ -132,13 +139,14 @@ impl DlnaController {
         let device_url = device.device.url();
         let response = avtransport.action(device_url, action, &args_str).await?;
         println!("Play响应: {:?}", response);
-        
+
         Ok(())
     }
 
     // 暂停播放
     pub async fn pause(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
-        let avtransport = self.get_avtransport_service(device)
+        let avtransport = self
+            .get_avtransport_service(device)
             .ok_or("设备不支持AVTransport服务")?;
 
         let action = "Pause";
@@ -147,13 +155,14 @@ impl DlnaController {
         let device_url = device.device.url();
         let response = avtransport.action(device_url, action, &args_str).await?;
         println!("Pause响应: {:?}", response);
-        
+
         Ok(())
     }
 
     // 停止播放
     pub async fn stop(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
-        let avtransport = self.get_avtransport_service(device)
+        let avtransport = self
+            .get_avtransport_service(device)
             .ok_or("设备不支持AVTransport服务")?;
 
         let action = "Stop";
@@ -162,13 +171,17 @@ impl DlnaController {
         let device_url = device.device.url();
         let response = avtransport.action(device_url, action, &args_str).await?;
         println!("Stop响应: {:?}", response);
-        
+
         Ok(())
     }
 
     // 获取传输信息
-    pub async fn get_transport_info(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
-        let avtransport = self.get_avtransport_service(device)
+    pub async fn get_transport_info(
+        &self,
+        device: &DlnaDevice,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let avtransport = self
+            .get_avtransport_service(device)
             .ok_or("设备不支持AVTransport服务")?;
 
         let action = "GetTransportInfo";
@@ -177,13 +190,17 @@ impl DlnaController {
         let device_url = device.device.url();
         let response = avtransport.action(device_url, action, &args_str).await?;
         println!("传输信息: {:?}", response);
-        
+
         Ok(())
     }
 
     // 获取位置信息
-    pub async fn get_position_info(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
-        let avtransport = self.get_avtransport_service(device)
+    pub async fn get_position_info(
+        &self,
+        device: &DlnaDevice,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let avtransport = self
+            .get_avtransport_service(device)
             .ok_or("设备不支持AVTransport服务")?;
 
         let action = "GetPositionInfo";
@@ -192,7 +209,7 @@ impl DlnaController {
         let device_url = device.device.url();
         let response = avtransport.action(device_url, action, &args_str).await?;
         println!("位置信息: {:?}", response);
-        
+
         Ok(())
     }
 }
@@ -200,44 +217,16 @@ impl DlnaController {
 // 生成DIDL-Lite元数据
 pub fn generate_didl_metadata(title: &str, mime_type: &str, duration: Option<&str>) -> String {
     let duration_str = duration.unwrap_or("0:00:00");
-    
-    format!(r#"&lt;DIDL-Lite xmlns:dc=&quot;http://purl.org/dc/elements/1.1/&quot; xmlns:upnp=&quot;urn:schemas-upnp-org:metadata-1-0/upnp/&quot; xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/&quot;&gt;
+
+    format!(
+        r#"&lt;DIDL-Lite xmlns:dc=&quot;http://purl.org/dc/elements/1.1/&quot; xmlns:upnp=&quot;urn:schemas-upnp-org:metadata-1-0/upnp/&quot; xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/&quot;&gt;
     &lt;item id=&quot;1&quot; parentID=&quot;-1&quot; restricted=&quot;0&quot;&gt;
         &lt;dc:title&gt;{}&lt;/dc:title&gt;
         &lt;dc:creator&gt;Unknown&lt;/dc:creator&gt;
         &lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;
         &lt;res protocolInfo=&quot;http-get:*:{}:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000&quot; duration=&quot;{}&quot;&gt;http://placeholder/url&lt;/res&gt;
     &lt;/item&gt;
-&lt;/DIDL-Lite&gt;"#, title, mime_type, duration_str)
-}
-
-// 获取本地IP地址
-pub async fn get_local_ip() -> Result<IpAddr, Box<dyn std::error::Error>> {
-    #[cfg(windows)]
-    {
-        // Windows 10 is multihomed so that the address that is used for the broadcast send is not guaranteed to be your local ip address, it can be any of the virtual interfaces instead.
-        // Thanks to @dheijl for figuring this out <3 (https://github.com/jakobhellermann/ssdp-client/issues/3#issuecomment-687098826)
-        let any: std::net::SocketAddr = ([0, 0, 0, 0], 0).into();
-        let socket = tokio::net::UdpSocket::bind(any).await?;
-        let googledns: std::net::SocketAddr = ([8, 8, 8, 8], 80).into();
-        socket.connect(googledns).await?;
-        let bind_addr = socket.local_addr()?;
-        
-        Ok(bind_addr.ip())
-    }
-    
-    #[cfg(not(windows))]
-    {
-        // 非Windows系统使用简单方法
-        let listener = std::net::TcpListener::bind("0.0.0.0:0")?;
-        let local_addr = listener.local_addr()?;
-        
-        match local_addr.ip() {
-            std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
-                println!("警告: 获取到未指定IP地址，使用回退地址 127.0.0.1");
-                Ok(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)))
-            }
-            ip => Ok(ip),
-        }
-    }
+&lt;/DIDL-Lite&gt;"#,
+        title, mime_type, duration_str
+    )
 }
