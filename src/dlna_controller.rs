@@ -220,19 +220,3 @@ impl DlnaController {
     }
 }
 
-// 生成DIDL-Lite元数据
-pub fn generate_didl_metadata(title: &str, mime_type: &str, duration: Option<&str>) -> String {
-    let duration_str = duration.unwrap_or("0:00:00");
-
-    format!(
-        r#"&lt;DIDL-Lite xmlns:dc=&quot;http://purl.org/dc/elements/1.1/&quot; xmlns:upnp=&quot;urn:schemas-upnp-org:metadata-1-0/upnp/&quot; xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/&quot;&gt;
-    &lt;item id=&quot;1&quot; parentID=&quot;-1&quot; restricted=&quot;0&quot;&gt;
-        &lt;dc:title&gt;{}&lt;/dc:title&gt;
-        &lt;dc:creator&gt;Unknown&lt;/dc:creator&gt;
-        &lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;
-        &lt;res protocolInfo=&quot;http-get:*:{}:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000&quot; duration=&quot;{}&quot;&gt;http://placeholder/url&lt;/res&gt;
-    &lt;/item&gt;
-&lt;/DIDL-Lite&gt;"#,
-        title, mime_type, duration_str
-    )
-}
