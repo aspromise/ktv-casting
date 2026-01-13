@@ -3,7 +3,7 @@ use actix_web::http::header::{HeaderName, HeaderValue};
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Result, web};
 use moka::{Expiry, future::Cache};
 use std::time::{Duration, Instant};
-use chrono::{Utc, NaiveTime};
+use chrono::Utc;
 use url;
 
 struct MyExpiry;
@@ -58,12 +58,13 @@ impl Expiry<String, String> for MyExpiry {
     }
 }
 
-struct UrlCache {
+#[derive(Clone)]
+pub struct UrlCache {
     cache: Cache<String, String>,
 }
 
 impl UrlCache {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let cache = Cache::builder()
             .max_capacity(200) // Set a default capacity
             .expire_after(MyExpiry)
@@ -71,12 +72,12 @@ impl UrlCache {
         UrlCache { cache }
     }
 
-    async fn get(&self, key: &str) -> Option<String> {
+    pub async fn get(&self, key: &str) -> Option<String> {
         self.cache.get(key).await
     }
 
     // origin_url:未解析的BV号与p号，如`BV1cet2z9Ety?page=1`,`BV1kGYyzZEc6`
-    async fn insert(&self, origin_url: &String) {
+    pub async fn insert(&self, origin_url: &String) {
         let bv_id = origin_url[..origin_url.find('?').unwrap_or(origin_url.len())].to_string();
         let page: Option<u32> = if let Some(pos) = origin_url.find("?page=") {
             origin_url[pos + 6..].parse().ok()

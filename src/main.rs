@@ -6,6 +6,10 @@ use tokio::time::{Duration, sleep};
 use actix_web::{get, web, App, HttpServer, HttpResponse};
 use futures_util::StreamExt;
 use reqwest::Client;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use playlist_manager::PlaylistManager;
+use media_server::UrlCache;
 
 mod dlna_controller;
 mod media_server;

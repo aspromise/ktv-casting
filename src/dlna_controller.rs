@@ -4,6 +4,8 @@ use rupnp::Device;
 use rupnp::ssdp::{SearchTarget, URN};
 use std::net::IpAddr;
 use std::time::Duration;
+use std::collections::HashMap;
+use chrono::NaiveTime;
 
 // AVTransport服务URN
 const AV_TRANSPORT: URN = URN::service("schemas-upnp-org", "AVTransport", 1);
@@ -128,6 +130,35 @@ impl DlnaController {
         Ok(())
     }
 
+    // 设置下一首媒体URI
+    pub async fn set_next_avtransport_uri(
+        &self,
+        device: &DlnaDevice,
+        next_uri: &str,
+        next_uri_metadata: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let avtransport = self
+            .get_avtransport_service(device)
+            .ok_or("设备不支持AVTransport服务")?;
+
+        let action = "SetNextAVTransportURI";
+        let args_str = format!(
+            r#"
+            <InstanceID>0</InstanceID>
+            <NextURI>{}</NextURI>
+            <NextURIMetaData>{}</NextURIMetaData>
+            "#,
+            next_uri, next_uri_metadata
+        );
+
+        let device_url = device.device.url();
+        let response = avtransport.action(device_url, action, &args_str).await?;
+
+        println!("SetNextAVTransportURI响应: {:?}", response);
+
+        Ok(())
+    }
+
     // 播放媒体
     pub async fn play(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
         let avtransport = self
@@ -181,6 +212,22 @@ impl DlnaController {
         Ok(())
     }
 
+    // 切换到下一首媒体
+    pub async fn next(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
+        let avtransport = self
+            .get_avtransport_service(device)
+            .ok_or("设备不支持AVTransport服务")?;
+
+        let action = "Next";
+        let args_str = "<InstanceID>0</InstanceID>";
+
+        let device_url = device.device.url();
+        let response = avtransport.action(device_url, action, &args_str).await?;
+        println!("Next响应: {:?}", response);
+
+        Ok(())
+    }
+
     // 获取传输信息
     pub async fn get_transport_info(
         &self,
@@ -204,7 +251,7 @@ impl DlnaController {
     pub async fn get_position_info(
         &self,
         device: &DlnaDevice,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
         let avtransport = self
             .get_avtransport_service(device)
             .ok_or("设备不支持AVTransport服务")?;
@@ -213,10 +260,29 @@ impl DlnaController {
         let args_str = "<InstanceID>0</InstanceID>";
 
         let device_url = device.device.url();
-        let response = avtransport.action(device_url, action, &args_str).await?;
+        let response: HashMap<String, String> = avtransport.action(device_url, action, &args_str).await?;
         println!("位置信息: {:?}", response);
 
-        Ok(())
+        Ok(response)
+    }
+
+    pub async fn get_remaining_time(
+        &self,
+        device: &DlnaDevice,
+    ) -> Result<u32, Box<dyn std::error::Error>> {
+        let position_info = self.get_position_info(device).await?;
+        let track_duration = position_info
+            .get("TrackDuration")
+            .ok_or("无法获取TrackDuration")?;
+        let current_time = position_info
+            .get("RelTime")
+            .ok_or("无法获取RelTime")?;
+
+        let track_duration = NaiveTime::parse_from_str(track_duration, "%H:%M:%S")?;
+        let current_time = NaiveTime::parse_from_str(current_time, "%H:%M:%S")?;
+
+        let remaining_time = track_duration - current_time;
+        Ok(remaining_time.num_seconds() as u32)
     }
 }
 
