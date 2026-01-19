@@ -1,12 +1,12 @@
+use chrono::NaiveTime;
+use futures::future::try_join_all;
 use futures::stream::StreamExt;
 use rupnp::Device;
+use rupnp::http::Uri;
 use rupnp::ssdp::{SearchTarget, URN};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
-use std::collections::HashMap;
-use chrono::NaiveTime;
-use rupnp::http::Uri;
-use futures::future::try_join_all;
 
 // AVTransport服务URN
 const AV_TRANSPORT: URN = URN::service("schemas-upnp-org", "AVTransport", 1);
@@ -78,24 +78,29 @@ impl DlnaController {
         Ok(dlna_devices)
     }
 
-    pub async fn get_devices_from_urls(&self, urls: &Vec<&'static str>) -> Result<Vec<DlnaDevice>, rupnp::Error> {
-        let devices = try_join_all(
-            urls.iter()
-                .map(|url| {
-                    let uri = Uri::from_static(url);
-                    Device::from_url(uri)
-                })
-        ).await?;
+    pub async fn get_devices_from_urls(
+        &self,
+        urls: &Vec<&'static str>,
+    ) -> Result<Vec<DlnaDevice>, rupnp::Error> {
+        let devices = try_join_all(urls.iter().map(|url| {
+            let uri = Uri::from_static(url);
+            Device::from_url(uri)
+        }))
+        .await?;
 
-        let dlna_devices: Vec<DlnaDevice> = devices.into_iter().map(|device| DlnaDevice {
-            device:device.clone(),
-            friendly_name: device.friendly_name().to_string(),
-            location: device.url().to_string(),
-            services: device.services()
-                .iter()
-                .map(|s| s.service_type().clone())
-                .collect(),
-        }).collect();
+        let dlna_devices: Vec<DlnaDevice> = devices
+            .into_iter()
+            .map(|device| DlnaDevice {
+                device: device.clone(),
+                friendly_name: device.friendly_name().to_string(),
+                location: device.url().to_string(),
+                services: device
+                    .services()
+                    .iter()
+                    .map(|s| s.service_type().clone())
+                    .collect(),
+            })
+            .collect();
         Ok(dlna_devices)
     }
 
@@ -193,9 +198,7 @@ impl DlnaController {
             "#;
 
         let device_url = device.device.url();
-        let response = avtransport
-            .action(device_url, action, &args_str)
-            .await?;
+        let response = avtransport.action(device_url, action, &args_str).await?;
         println!("Play响应: {:?}", response);
 
         Ok(())
@@ -281,7 +284,8 @@ impl DlnaController {
         let args_str = "<InstanceID>0</InstanceID>";
 
         let device_url = device.device.url();
-        let response: HashMap<String, String> = avtransport.action(device_url, action, &args_str).await?;
+        let response: HashMap<String, String> =
+            avtransport.action(device_url, action, &args_str).await?;
         println!("位置信息: {:?}", response);
 
         Ok(response)
@@ -295,9 +299,7 @@ impl DlnaController {
         let track_duration = position_info
             .get("TrackDuration")
             .ok_or("无法获取TrackDuration")?;
-        let current_time = position_info
-            .get("RelTime")
-            .ok_or("无法获取RelTime")?;
+        let current_time = position_info.get("RelTime").ok_or("无法获取RelTime")?;
 
         let track_duration = NaiveTime::parse_from_str(track_duration, "%H:%M:%S")?;
         let current_time = NaiveTime::parse_from_str(current_time, "%H:%M:%S")?;
