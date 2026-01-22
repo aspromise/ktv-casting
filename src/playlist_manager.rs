@@ -92,16 +92,17 @@ impl PlaylistManager {
             Vec::new()
         };
 
-        // 从 list 数组中提取第一条状态为 “sung” 的歌单 URL
+        // 从 list 数组中提取最后一条状态为 “sung” 的歌单 URL
         let sung_url: Option<String> = if let Some(list_array) = resp_json["list"].as_array() {
             list_array
-                .iter()
-                .find(|item| {
-                    item.get("state")
-                        .is_some_and(|s| s.as_str().unwrap_or("") == "sung")
-                })
-                .and_then(|item| item["url"].as_str()) // 把 &str 转为 Option<&str>
-                .map(extract_bv_function) // 如果你需要把 url 处理成 bv 等
+            .iter()
+            .rev() // 反转迭代器，从后往前找
+            .find(|item| {
+                item.get("state")
+                .is_some_and(|s| s.as_str().unwrap_or("") == "sung")
+            })
+            .and_then(|item| item["url"].as_str()) // 把 &str 转为 Option<&str>
+            .map(extract_bv_function) // 如果你需要把 url 处理成 bv 等
         } else {
             None
         };
@@ -183,7 +184,7 @@ impl PlaylistManager {
         if !resp_json["success"].as_bool().unwrap_or(false) {
             return Err(format!("请求失败: {}", resp_json));
         }
-        // self.fetch_playlist().await?;
+        self.fetch_playlist().await?;
 
         Ok(())
     }
@@ -195,7 +196,7 @@ async fn test_playlist_manager() -> Result<(), Box<dyn std::error::Error>> {
 
     let playlist = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let mut manager = PlaylistManager::new("http://localhost:5823", 0, playlist.clone());
+    let mut manager = PlaylistManager::new("https://ktv.starfreedomx.top", 1111, playlist.clone());
 
     println!("开始获取播放列表...");
 
@@ -228,7 +229,10 @@ async fn test_playlist_manager() -> Result<(), Box<dyn std::error::Error>> {
     } // <--- 锁在这里被强制释放 (DROP)
 
     // --- 后台任务开始 ---
-    // manager.start_periodic_update(|url:&str| println!("Song singing changed to {}!",url));
+    manager.start_periodic_update(|url: String| {
+        println!("Song singing changed to {}!", url);
+        Box::pin(async {})
+    });
 
     // 【关键点 3】：sleep 必须在“裸奔”状态下运行（不持有任何锁）
     // 此时 playlist 锁是空闲的，后台线程的 fetch_playlist 才能拿到锁并更新数据

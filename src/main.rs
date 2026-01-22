@@ -6,8 +6,10 @@ use futures_util::StreamExt;
 use local_ip_address::local_ip;
 use playlist_manager::PlaylistManager;
 use reqwest::Client;
+use tokio::time::sleep;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use url::Url;
 
@@ -77,13 +79,15 @@ async fn main() -> Result<()> {
     if devices.is_empty() {
         bail!("No DLNA Devices");
     }
+    println!("发现以下DLNA设备：");
+    println!("编号: 设备名称 at 设备地址");
     for (i, device) in devices.iter().enumerate() {
         println!("{}: {} at {}", i, device.friendly_name, device.location);
     }
     println!("输入设备编号：");
     input.clear();
     io::stdin().read_line(&mut input).expect("读取编号失败");
-    let device_num: usize = input.parse()?;
+    let device_num: usize = input.trim().parse()?;
     if device_num > devices.len() {
         bail!("编号有误");
     }
@@ -93,23 +97,82 @@ async fn main() -> Result<()> {
         let controller = controller.clone();
         let device = device.clone();
         Box::pin(async move {
-            controller
-                .set_next_avtransport_uri(&device, &url, "", local_ip, server_port)
-                .await
-                .unwrap();
-            controller.next(&device).await.unwrap();
+            // 重试设置AVTransport URI
+            loop {
+                match controller
+                    .set_next_avtransport_uri(&device, &url, "", local_ip, server_port)
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(e) => {
+                        let error_msg = format!("{}", e);
+                        eprintln!("设置AVTransport URI失败: {}，500ms后重试", error_msg);
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+            
+            // 重试next
+            loop {
+                match controller.next(&device).await {
+                    Ok(_) => break,
+                    Err(e) => {
+                        let error_msg = format!("{}", e);
+                        eprintln!("next失败: {}，500ms后重试", error_msg);
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+            
+            // 重试play
+            loop {
+                match controller.play(&device).await {
+                    Ok(_) => break,
+                    Err(e) => {
+                        let error_msg = format!("{}", e);
+                        eprintln!("play失败: {}，500ms后重试", error_msg);
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
         })
     });
 
     tokio::spawn(async move {
         let controller = DlnaController::new();
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        let mut remaining_secs;
+        let mut remaining_secs: u32;
+        let mut total_secs: u32;
         loop {
             interval.tick().await;
-            remaining_secs = controller.get_remaining_secs(&device_cloned).await.unwrap();
-            if remaining_secs <= 2 {
-                playlist_manager.next_song().await.unwrap();
+            // 重试get_secs
+            loop {
+                match controller.get_secs(&device_cloned).await {
+                    Ok(result) => {
+                        (remaining_secs, total_secs) = result;
+                        break;
+                    }
+                    Err(e) => {
+                        let error_msg = format!("{}", e);
+                        eprintln!("get_secs失败: {}，500ms后重试", error_msg);
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+            if remaining_secs <= 2 && total_secs > 0 {
+                eprintln!("剩余时间{}秒，总时间{}秒，准备切歌", remaining_secs, total_secs);
+                // 重试next_song
+                loop {
+                    match playlist_manager.next_song().await {
+                        Ok(_) => break,
+                        Err(e) => {
+                            let error_msg = format!("{}", e);
+                            eprintln!("next_song失败: {}，500ms后重试", error_msg);
+                            sleep(Duration::from_millis(500)).await;
+                        }
+                    }
+                }
+                sleep(Duration::from_secs(5)).await;
             }
         }
     });

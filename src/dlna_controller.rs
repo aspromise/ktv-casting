@@ -1,4 +1,4 @@
-use chrono::NaiveTime;
+use chrono::{NaiveTime, Timelike};
 use futures::future::try_join_all;
 use futures::stream::StreamExt;
 use rupnp::Device;
@@ -10,7 +10,6 @@ use std::time::Duration;
 
 // AVTransport服务URN
 const AV_TRANSPORT: URN = URN::service("schemas-upnp-org", "AVTransport", 1);
-const RENDERING_CONTROL: URN = URN::service("schemas-upnp-org", "RenderingControl", 1);
 
 // DLNA设备信息
 #[derive(Debug, Clone)]
@@ -121,13 +120,13 @@ impl DlnaController {
         current_uri_metadata: &str,
         server_ip: IpAddr,
         server_port: u16,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), rupnp::Error> {
         let avtransport = self
             .get_avtransport_service(device)
-            .ok_or("设备不支持AVTransport服务")?;
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
         // 构建完整的媒体URL
-        let media_url = format!("http://{}:{}{}", server_ip, server_port, current_uri);
+        let media_url = format!("http://{}:{}/{}", server_ip, server_port, current_uri);
         // let media_url = "https://cn-jsnt-ct-01-06.bilivideo.com/upgcxcode/95/66/65166695/65166695-1-208.mp4?e=ig8euxZM2rNcNbN3hwdVhwdlhb4VhwdVhoNvNC8BqJIzNbfq9rVEuxTEnE8L5F6VnEsSTx0vkX8fqJeYTj_lta53NCM=&platform=html5&oi=1696788563&trid=0000552b5f27ec06482cbd0f902c89beadeT&mid=483794508&nbs=1&os=bcache&uipk=5&deadline=1768072065&gen=playurlv3&og=hw&upsig=40d24fb953240187eb8a621ba81a3085&uparams=e,platform,oi,trid,mid,nbs,os,uipk,deadline,gen,og&cdnid=4284&bvc=vod&nettype=0&bw=2247418&agrr=0&buvid=&build=0&dl=0&f=T_0_0&mobi_app=&orderid=0,1".to_string();
 
         println!("设置媒体URI: {}", media_url);
@@ -153,7 +152,7 @@ impl DlnaController {
         Ok(())
     }
 
-    // 设置下一首媒体URI
+    // 设置下一个AVTransport URI（用于播放列表）
     pub async fn set_next_avtransport_uri(
         &self,
         device: &DlnaDevice,
@@ -161,13 +160,13 @@ impl DlnaController {
         next_uri_metadata: &str,
         server_ip: IpAddr,
         server_port: u16,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), rupnp::Error> {
         let avtransport = self
             .get_avtransport_service(device)
-            .ok_or("设备不支持AVTransport服务")?;
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
         let action = "SetNextAVTransportURI";
-        let media_url = format!("http://{}:{}{}", server_ip, server_port, next_uri);
+        let media_url = format!("http://{}:{}/{}", server_ip, server_port, next_uri);
         let args_str = format!(
             r#"
             <InstanceID>0</InstanceID>
@@ -186,10 +185,10 @@ impl DlnaController {
     }
 
     // 播放媒体
-    pub async fn play(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn play(&self, device: &DlnaDevice) -> Result<(), rupnp::Error> {
         let avtransport = self
             .get_avtransport_service(device)
-            .ok_or("设备不支持AVTransport服务")?;
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
         let action = "Play";
         let args_str = r#"
@@ -205,10 +204,10 @@ impl DlnaController {
     }
 
     // 暂停播放
-    pub async fn pause(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn pause(&self, device: &DlnaDevice) -> Result<(), rupnp::Error> {
         let avtransport = self
             .get_avtransport_service(device)
-            .ok_or("设备不支持AVTransport服务")?;
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
         let action = "Pause";
         let args_str = "<InstanceID>0</InstanceID>";
@@ -221,10 +220,10 @@ impl DlnaController {
     }
 
     // 停止播放
-    pub async fn stop(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn stop(&self, device: &DlnaDevice) -> Result<(), rupnp::Error> {
         let avtransport = self
             .get_avtransport_service(device)
-            .ok_or("设备不支持AVTransport服务")?;
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
         let action = "Stop";
         let args_str = "<InstanceID>0</InstanceID>";
@@ -236,11 +235,11 @@ impl DlnaController {
         Ok(())
     }
 
-    // 切换到下一首媒体
-    pub async fn next(&self, device: &DlnaDevice) -> Result<(), Box<dyn std::error::Error>> {
+    // 下一首
+    pub async fn next(&self, device: &DlnaDevice) -> Result<(), rupnp::Error> {
         let avtransport = self
             .get_avtransport_service(device)
-            .ok_or("设备不支持AVTransport服务")?;
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
         let action = "Next";
         let args_str = "<InstanceID>0</InstanceID>";
@@ -256,10 +255,10 @@ impl DlnaController {
     pub async fn get_transport_info(
         &self,
         device: &DlnaDevice,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), rupnp::Error> {
         let avtransport = self
             .get_avtransport_service(device)
-            .ok_or("设备不支持AVTransport服务")?;
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
         let action = "GetTransportInfo";
         let args_str = "<InstanceID>0</InstanceID>";
@@ -275,36 +274,145 @@ impl DlnaController {
     pub async fn get_position_info(
         &self,
         device: &DlnaDevice,
-    ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+    ) -> Result<HashMap<String, String>, rupnp::Error> {
         let avtransport = self
             .get_avtransport_service(device)
-            .ok_or("设备不支持AVTransport服务")?;
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
         let action = "GetPositionInfo";
         let args_str = "<InstanceID>0</InstanceID>";
 
         let device_url = device.device.url();
-        let response: HashMap<String, String> =
-            avtransport.action(device_url, action, &args_str).await?;
-        println!("位置信息: {:?}", response);
+        let response = avtransport.action(device_url, action, &args_str).await?;
 
-        Ok(response)
+        // 解析响应
+        let mut result = HashMap::new();
+        for (key, value) in response {
+            result.insert(key, value);
+        }
+
+        Ok(result)
     }
 
-    pub async fn get_remaining_secs(
-        &self,
-        device: &DlnaDevice,
-    ) -> Result<u32, Box<dyn std::error::Error>> {
+    // 获取当前播放位置（秒）
+    pub async fn get_secs(&self, device: &DlnaDevice) -> Result<(u32, u32), rupnp::Error> {
         let position_info = self.get_position_info(device).await?;
-        let track_duration = position_info
-            .get("TrackDuration")
-            .ok_or("无法获取TrackDuration")?;
-        let current_time = position_info.get("RelTime").ok_or("无法获取RelTime")?;
-
-        let track_duration = NaiveTime::parse_from_str(track_duration, "%H:%M:%S")?;
-        let current_time = NaiveTime::parse_from_str(current_time, "%H:%M:%S")?;
+        
+        // 获取相对时间
+        let default_time = "00:00:00".to_string();
+        let rel_time = position_info.get("RelTime").unwrap_or(&default_time);
+        let duration = position_info.get("TrackDuration").unwrap_or(&default_time);
+        eprintln!("get_secs() : RelTime: {}, TrackDuration: {}", rel_time, duration);
+        
+        let track_duration = NaiveTime::parse_from_str(duration, "%H:%M:%S").map_err(|e| {
+            rupnp::Error::ParseError("无法解析TrackDuration")
+        })?;
+        let current_time = NaiveTime::parse_from_str(rel_time, "%H:%M:%S").map_err(|e| {
+            rupnp::Error::ParseError("无法解析RelTime")
+        })?;
 
         let remaining_time = track_duration - current_time;
-        Ok(remaining_time.num_seconds() as u32)
+
+        let remaining_secs = remaining_time.num_seconds() as u32;
+        let total_secs = track_duration.second();
+        
+        Ok((remaining_secs, total_secs))
+    }
+
+    // 设置渲染器音量
+    pub async fn set_volume(
+        &self,
+        device: &DlnaDevice,
+        volume: u32,
+    ) -> Result<(), rupnp::Error> {
+        let rendering_control = device
+            .device
+            .services()
+            .iter()
+            .find(|s| *s.service_type() == URN::service("schemas-upnp-org", "RenderingControl", 1))
+            .ok_or(rupnp::Error::ParseError("设备不支持RenderingControl服务"))?;
+
+        let action = "SetVolume";
+        let args_str = format!(
+            r#"
+            <InstanceID>0</InstanceID>
+            <Channel>Master</Channel>
+            <DesiredVolume>{}</DesiredVolume>
+            "#,
+            volume
+        );
+
+        let device_url = device.device.url();
+        let response = rendering_control.action(device_url, action, &args_str).await?;
+        println!("SetVolume响应: {:?}", response);
+
+        Ok(())
+    }
+
+    // 获取渲染器音量
+    pub async fn get_volume(&self, device: &DlnaDevice) -> Result<u32, rupnp::Error> {
+        let rendering_control = device
+            .device
+            .services()
+            .iter()
+            .find(|s| *s.service_type() == URN::service("schemas-upnp-org", "RenderingControl", 1))
+            .ok_or(rupnp::Error::ParseError("设备不支持RenderingControl服务"))?;
+
+        let action = "GetVolume";
+        let args_str = r#"
+            <InstanceID>0</InstanceID>
+            <Channel>Master</Channel>
+            "#;
+
+        let device_url = device.device.url();
+        let response = rendering_control.action(device_url, action, &args_str).await?;
+        
+        // 解析音量值
+        let default_volume = "0".to_string();
+        let volume_str = response.get("CurrentVolume").unwrap_or(&default_volume);
+        let volume: u32 = volume_str.parse().unwrap_or(0);
+        
+        Ok(volume)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_set_next_avtransport_uri() {
+        let controller = DlnaController::new();
+        
+        // 发现DLNA设备
+        let devices = controller.discover_devices().await;
+        match devices {
+            Ok(devices) => {
+                if devices.is_empty() {
+                    println!("未发现DLNA设备，跳过测试");
+                    return;
+                }
+                
+                // 使用第一个设备
+                let device = &devices[0];
+                println!("使用设备: {}", device.friendly_name);
+                
+                // 测试设置下一首媒体URI
+                let result = controller.set_next_avtransport_uri(
+                    device,
+                    "/media/test_next.mp4",
+                    "",
+                    "127.0.0.1".parse().unwrap(),
+                    8080,
+                ).await;
+                
+                match result {
+                    Ok(_) => println!("设置下一首媒体URI成功"),
+                    Err(e) => println!("设置下一首媒体URI失败: {}", e),
+                }
+            }
+            Err(e) => {
+                println!("设备发现失败: {}", e);
+            }
+        }
     }
 }
