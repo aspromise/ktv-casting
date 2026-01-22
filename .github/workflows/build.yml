@@ -12,7 +12,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  BIN_NAME: ktv_casting
+  BIN_NAME: ktv-casting
 
 jobs:
   build-and-upload:
