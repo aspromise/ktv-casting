@@ -181,12 +181,13 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let controller = DlnaController::new();
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        let mut remaining_secs: u32;
-        let mut total_secs: u32;
+        let mut remaining_secs: u32 = 0;
+        let mut total_secs: u32 = 0;
         loop {
             interval.tick().await;
             // 重试get_secs
             loop {
+
                 match controller.get_secs(&device_cloned).await {
                     Ok(result) => {
                         (remaining_secs, total_secs) = result;
@@ -194,6 +195,17 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => {
                         let error_msg = format!("{}", e);
+                        let error_code: Option<u32> = error_msg
+                            .split(|c: char| !c.is_numeric())
+                            .find(|s| s.len() == 3)
+                            .and_then(|s| s.parse().ok());
+                        if let Some(code) = error_code {
+                            if code / 100 == 2 {
+                                // 2xx错误码视为成功
+                                info!("设置AVTransport URI返回错误码{}，视为成功", code);
+                                break;
+                            }
+                        }
                         warn!("get_secs失败: {}，500ms后重试", error_msg);
                         sleep(Duration::from_millis(500)).await;
                     }
