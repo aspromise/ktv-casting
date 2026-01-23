@@ -13,6 +13,11 @@ pub async fn get_bilibili_direct_link(bv_id: &str, page: Option<u32>) -> Result<
     let client = Client::new();
     let page = page.unwrap_or(1);
 
+    // Page is 1-based for bilibili APIs. Guard against 0 to avoid (page - 1) underflow.
+    if page == 0 {
+        return Err("无效的分P: page 必须从 1 开始".to_string());
+    }
+
     // 第一步：获取CID
     let cid = get_video_cid(&client, bv_id, page).await?;
 
@@ -52,12 +57,27 @@ async fn get_video_cid(client: &Client, bv_id: &str, page: u32) -> Result<String
         .and_then(|d| d.as_array())
         .ok_or_else(|| "无效的数据格式".to_string())?;
 
-    if data.is_empty() || (page as usize) > data.len() {
-        return Err(format!("无效的分P:  p={}, 总分P数:  {}", page, data.len()));
+    if data.is_empty() {
+        return Err("该视频没有可用的分P数据".to_string());
+    }
+
+    // bilibili page is 1-based.
+    if page == 0 {
+        return Err("无效的分P: page 必须从 1 开始".to_string());
+    }
+
+    let idx = (page - 1) as usize;
+    if idx >= data.len() {
+        return Err(format!(
+            "无效的分P: page={}, 有效范围: 1..={}, 总分P数: {}",
+            page,
+            data.len(),
+            data.len()
+        ));
     }
 
     // 获取指定分P的CID
-    let cid = data[(page - 1) as usize]
+    let cid = data[idx]
         .get("cid")
         .and_then(|c| c.as_u64())
         .ok_or_else(|| "无法获取CID".to_string())?;

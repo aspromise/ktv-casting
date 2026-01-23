@@ -19,6 +19,35 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+fn build_didl_lite_metadata(title: &str, media_url: &str, protocol_info: Option<&str>) -> String {
+    // Build a minimal DIDL-Lite and then XML-escape it for embedding into <CurrentURIMetaData>.
+    // Many renderers require at least: upnp:class + res@protocolInfo.
+    // NOTE: avoid strict DLNA.ORG_PN profile binding; some renderers reject when profile ≠ actual.
+    // Start permissive, then tighten if needed.
+    let protocol = protocol_info.unwrap_or("http-get:*:video/mp4:*");
+
+    // Important: the <res> inner URL should be XML-escaped *once* (so & -> &amp;).
+    let res_url = xml_escape(media_url);
+
+    let didl = format!(
+        r#"<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">
+<item id=\"0\" parentID=\"-1\" restricted=\"1\">
+<dc:title>{}</dc:title>
+<upnp:storageMedium>UNKNOWN</upnp:storageMedium>
+<upnp:writeStatus>UNKNOWN</upnp:writeStatus>
+<res protocolInfo=\"{}\">{}</res>
+<upnp:class>object.item.videoItem</upnp:class>
+</item>
+</DIDL-Lite>"#,
+        xml_escape(title),
+        protocol,
+        res_url
+    );
+
+    // Embed metadata as escaped XML text nodes: <CurrentURIMetaData>&lt;DIDL-Lite ...&gt;...
+    xml_escape(&didl)
+}
+
 fn build_soap_envelope(action: &str, args_xml: &str) -> String {
     // Keep the shape consistent with what most renderers accept (and close to your B站抓包).
     // Note: `rupnp` will build its own envelope too, but we log a best-effort equivalent
@@ -272,14 +301,22 @@ impl DlnaController {
         // let media_url = "https://cn-jsnt-ct-01-06.bilivideo.com/upgcxcode/95/66/65166695/65166695-1-208.mp4?e=ig8euxZM2rNcNbN3hwdVhwdlhb4VhwdVhoNvNC8BqJIzNbfq9rVEuxTEnE8L5F6VnEsSTx0vkX8fqJeYTj_lta53NCM=&platform=html5&oi=1696788563&trid=0000552b5f27ec06482cbd0f902c89beadeT&mid=483794508&nbs=1&os=bcache&uipk=5&deadline=1768072065&gen=playurlv3&og=hw&upsig=40d24fb953240187eb8a621ba81a3085&uparams=e,platform,oi,trid,mid,nbs,os,uipk,deadline,gen,og&cdnid=4284&bvc=vod&nettype=0&bw=2247418&agrr=0&buvid=&build=0&dl=0&f=T_0_0&mobi_app=&orderid=0,1".to_string();
 
         log::info!("设置媒体URI: {}", media_url);
-        log::debug!("元数据: {}", current_uri_metadata);
+        log::debug!("元数据(传入): {}", current_uri_metadata);
+
+        // If caller didn't provide metadata, generate a minimal DIDL-Lite for compatibility.
+        let metadata = if current_uri_metadata.trim().is_empty() {
+            // Title can be anything; devices often only care about protocolInfo.
+            build_didl_lite_metadata(current_uri, &media_url, None)
+        } else {
+            current_uri_metadata.to_string()
+        };
 
         // 准备SOAP请求参数
         let action = "SetAVTransportURI";
         let args_str = format!(
-            "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData>{}</CurrentURIMetaData>",
+            "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData>{}</CurrentURIMetaData><SourceId></SourceId><ExtendData></ExtendData>",
             xml_escape(&media_url),
-            current_uri_metadata
+            metadata
         );
 
         // 发送SOAP请求 - 统一使用设备描述文档URL(location)作为base url
@@ -308,10 +345,16 @@ impl DlnaController {
 
         let action = "SetNextAVTransportURI";
         let media_url = format!("http://{}:{}/{}", server_ip, server_port, next_uri);
+        let metadata = if next_uri_metadata.trim().is_empty() {
+            build_didl_lite_metadata(next_uri, &media_url, None)
+        } else {
+            next_uri_metadata.to_string()
+        };
+
         let args_str = format!(
             "<InstanceID>0</InstanceID><NextURI>{}</NextURI><NextURIMetaData>{}</NextURIMetaData>",
             xml_escape(&media_url),
-            next_uri_metadata
+            metadata
         );
 
         let base_url = device_location_uri(device)?;
