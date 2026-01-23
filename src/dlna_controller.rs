@@ -190,6 +190,7 @@ impl DlnaController {
             .get_avtransport_service(device)
             .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
+        log::info!("正在发送Play指令...");
         let action = "Play";
         let args_str = r#"
             <InstanceID>0</InstanceID>
@@ -209,6 +210,7 @@ impl DlnaController {
             .get_avtransport_service(device)
             .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
+        log::info!("正在发送Pause指令...");
         let action = "Pause";
         let args_str = "<InstanceID>0</InstanceID>";
 
@@ -225,6 +227,7 @@ impl DlnaController {
             .get_avtransport_service(device)
             .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
+        log::info!("正在发送Stop指令...");
         let action = "Stop";
         let args_str = "<InstanceID>0</InstanceID>";
 
@@ -306,9 +309,9 @@ impl DlnaController {
         );
 
         let track_duration = NaiveTime::parse_from_str(duration, "%H:%M:%S")
-            .map_err(|e| rupnp::Error::ParseError("无法解析TrackDuration"))?;
+            .map_err(|_| rupnp::Error::ParseError("无法解析TrackDuration"))?;
         let current_time = NaiveTime::parse_from_str(rel_time, "%H:%M:%S")
-            .map_err(|e| rupnp::Error::ParseError("无法解析RelTime"))?;
+            .map_err(|_| rupnp::Error::ParseError("无法解析RelTime"))?;
 
         let remaining_time = track_duration - current_time;
 

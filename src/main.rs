@@ -222,7 +222,7 @@ async fn main() -> Result<()> {
                         if let Some(code) = error_code {
                             if code / 100 == 2 {
                                 // 2xx错误码视为成功
-                                info!("设置AVTransport URI返回错误码{}，视为成功", code);
+                                info!("播放返回错误码{}，视为成功", code);
                                 break;
                             }
                         }
@@ -258,7 +258,7 @@ async fn main() -> Result<()> {
                         if let Some(code) = error_code {
                             if code / 100 == 2 {
                                 // 2xx错误码视为成功
-                                info!("设置AVTransport URI返回错误码{}，视为成功", code);
+                                info!("获取进度返回错误码{}，视为成功", code);
                                 break;
                             }
                         }
