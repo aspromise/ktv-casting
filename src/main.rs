@@ -107,7 +107,10 @@ async fn main() -> Result<()> {
 
             loop{
                 match controller.stop(&device).await {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        info!("成功停止播放");
+                        break;
+                    },
                     Err(e) => {
                         let error_msg = format!("{}", e);
                         let error_code: Option<u32> = error_msg
@@ -132,7 +135,10 @@ async fn main() -> Result<()> {
                     .set_avtransport_uri(&device, &url, "", local_ip, server_port)
                     .await
                 {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        info!("成功设置AVTransport URI为 {}", url);
+                        break;
+                    },
                     Err(e) => {
                         let error_msg = format!("{}", e);
                         let error_code: Option<u32> = error_msg
@@ -203,7 +209,10 @@ async fn main() -> Result<()> {
             // 重试play
             loop {
                 match controller.play(&device).await {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        info!("成功开始播放");
+                        break;
+                    },
                     Err(e) => {
                         let error_msg = format!("{}", e);
                         let error_code: Option<u32> = error_msg
