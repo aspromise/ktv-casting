@@ -222,7 +222,7 @@ async fn main() -> Result<()> {
                         if let Some(code) = error_code {
                             if code / 100 == 2 {
                                 // 2xx错误码视为成功
-                                info!("设置AVTransport URI返回错误码{}，视为成功", code);
+                                info!("播放返回错误码{}，视为成功", code);
                                 break;
                             }
                         }
@@ -247,6 +247,10 @@ async fn main() -> Result<()> {
                 match controller.get_secs(&device_cloned).await {
                     Ok(result) => {
                         (remaining_secs, total_secs) = result;
+                        info!(
+                            "获取播放进度成功，剩余时间{}秒，总时间{}秒",
+                            remaining_secs, total_secs
+                        );
                         break;
                     }
                     Err(e) => {
@@ -258,7 +262,7 @@ async fn main() -> Result<()> {
                         if let Some(code) = error_code {
                             if code / 100 == 2 {
                                 // 2xx错误码视为成功
-                                info!("设置AVTransport URI返回错误码{}，视为成功", code);
+                                info!("获取进度返回错误码{}，视为成功", code);
                                 break;
                             }
                         }

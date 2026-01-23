@@ -4,9 +4,216 @@ use futures::stream::StreamExt;
 use rupnp::Device;
 use rupnp::http::Uri;
 use rupnp::ssdp::{SearchTarget, URN};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
+
+fn extract_xml_tag_value(xml: &str, tag: &str) -> Option<String> {
+    // Best-effort extraction for simple SOAP responses.
+    // Works for patterns like: <RelTime>00:00:12</RelTime>
+    // (No full XML parsing; enough for common DLNA renderers.)
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].trim().to_string())
+}
+
+fn is_unknown_time(s: &str) -> bool {
+    let t = s.trim();
+    t.is_empty() || t == "00:00:00" || t.eq_ignore_ascii_case("NOT_IMPLEMENTED")
+}
+
+fn xml_escape(s: &str) -> String {
+    // Minimal XML escaping for element text nodes.
+    // (Enough to keep SOAP XML well-formed when URLs contain & and friends.)
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn build_didl_lite_metadata(title: &str, media_url: &str, protocol_info: Option<&str>) -> String {
+    // Build a minimal DIDL-Lite and then XML-escape it for embedding into <CurrentURIMetaData>.
+    // Many renderers require at least: upnp:class + res@protocolInfo.
+    // NOTE: avoid strict DLNA.ORG_PN profile binding; some renderers reject when profile ≠ actual.
+    // Start permissive, then tighten if needed.
+    let protocol = protocol_info.unwrap_or("http-get:*:video/mp4:*");
+
+    // Important: the <res> inner URL should be XML-escaped *once* (so & -> &amp;).
+    let res_url = xml_escape(media_url);
+
+    let didl = format!(
+        r#"<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">
+<item id=\"0\" parentID=\"-1\" restricted=\"1\">
+<dc:title>{}</dc:title>
+<upnp:storageMedium>UNKNOWN</upnp:storageMedium>
+<upnp:writeStatus>UNKNOWN</upnp:writeStatus>
+<res protocolInfo=\"{}\">{}</res>
+<upnp:class>object.item.videoItem</upnp:class>
+</item>
+</DIDL-Lite>"#,
+        xml_escape(title),
+        protocol,
+        res_url
+    );
+
+    // Embed metadata as escaped XML text nodes: <CurrentURIMetaData>&lt;DIDL-Lite ...&gt;...
+    xml_escape(&didl)
+}
+
+fn build_soap_envelope(action: &str, args_xml: &str) -> String {
+    // Keep the shape consistent with what most renderers accept (and close to your B站抓包).
+    // Note: `rupnp` will build its own envelope too, but we log a best-effort equivalent
+    // so you can diff with a packet capture.
+    format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+        <u:{action} xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">{args}</u:{action}>
+  </s:Body>
+</s:Envelope>"#,
+        action = action,
+        args = args_xml
+    )
+}
+
+fn device_location_uri(device: &DlnaDevice) -> Result<Uri, rupnp::Error> {
+    device
+        .location
+        .parse::<Uri>()
+        .map_err(|_| rupnp::Error::ParseError("无法解析设备location为Uri"))
+}
+
+fn log_upnp_action(service: &rupnp::Service, base_url: &Uri, action: &str, args_xml: &str) {
+    // `service.action()` internally ends up using control_url(base_url).
+    // We can't call the private control_url() here, so we log the base_url and also log
+    // the serviceId/type to help confirm we matched the expected service.
+    //
+    // If you still see 204, compare this log with your抓包，重点确认：Host/port/path。
+    let soap_action_header = format!(
+        "\"urn:schemas-upnp-org:service:AVTransport:1#{}\"",
+        action
+    );
+
+    // Logged body is a best-effort “wire-like” payload for diffing.
+    let envelope = build_soap_envelope(action, args_xml);
+
+    log::info!(
+        "UPnP Action -> base_url={} service_id={} service_type={} SOAPAction={}",
+        base_url,
+        service.service_id(),
+        service.service_type(),
+        soap_action_header
+    );
+    log::debug!("UPnP Action body (approx) => {}", envelope);
+}
+
+/// Some renderers publish a `controlURL` like `_urn:schemas-upnp-org:service:AVTransport_control`
+/// (missing the leading `/`). In practice the working endpoint is often `/_urn:...`.
+///
+/// `rupnp`'s internal URL replacement may produce the wrong path for such devices.
+/// To make behavior explicit (and loggable), we send the SOAP request ourselves to:
+/// `{scheme}://{host}:{port}/{control_path}`.
+async fn avtransport_action_compat(
+    base_url: &Uri,
+    action: &str,
+    args_xml: &str,
+) -> Result<HashMap<String, String>, rupnp::Error> {
+    let host = base_url
+        .host()
+        .ok_or(rupnp::Error::ParseError("base_url缺少host"))?
+        .to_string();
+    let port = base_url
+        .port_u16()
+        .ok_or(rupnp::Error::ParseError("base_url缺少port"))?;
+    let scheme = base_url
+        .scheme_str()
+        .ok_or(rupnp::Error::ParseError("base_url缺少scheme"))?;
+
+    // Device's description.xml says controlURL is `_urn:...` (no leading slash)
+    // but B站抓包显示 path 是 `/_urn:...`.
+    let control_path = "/_urn:schemas-upnp-org:service:AVTransport_control";
+    let final_url = format!("{}://{}:{}{}", scheme, host, port, control_path);
+
+    let soap_action_header = format!(
+        "\"urn:schemas-upnp-org:service:AVTransport:1#{}\"",
+        action
+    );
+    let body = build_soap_envelope(action, args_xml);
+
+    log::info!(
+        "UPnP Action (compat) -> url={} SOAPAction={}",
+        final_url,
+        soap_action_header
+    );
+    log::debug!("UPnP Action (compat) body => {}", body);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "SOAPAction",
+        HeaderValue::from_str(&soap_action_header)
+            .map_err(|_| rupnp::Error::ParseError("SOAPAction header非法"))?,
+    );
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/xml; charset=\"utf-8\""),
+    );
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .map_err(|_| rupnp::Error::ParseError("创建reqwest client失败"))?;
+
+    let resp = client
+        .post(&final_url)
+        .headers(headers)
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| rupnp::Error::ParseError(Box::leak(format!("发送SOAP请求失败: {}", e).into_boxed_str())))?;
+
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| rupnp::Error::ParseError(Box::leak(format!("读取SOAP响应失败: {}", e).into_boxed_str())))?;
+
+    if status.as_u16() != 200 {
+        // Non-200 treated as error. Include status + body for diagnosis.
+        log::warn!("UPnP Action (compat) status={} body={}", status, text);
+        return Err(rupnp::Error::ParseError(Box::leak(
+            format!("AVTransport返回HTTP状态码{}", status.as_u16()).into_boxed_str(),
+        )));
+    }
+
+    // Parse a few common fields from SOAP response so callers like GetPositionInfo work.
+    // This keeps dependencies minimal; if you need robust parsing later, we can introduce
+    // an XML crate and parse properly.
+    log::debug!("UPnP Action (compat) status=200 body={}", text);
+
+    let mut out = HashMap::new();
+
+    // AVTransport:GetPositionInfo common fields
+    for k in [
+        "Track",
+        "TrackDuration",
+        "TrackMetaData",
+        "TrackURI",
+        "RelTime",
+        "AbsTime",
+        "RelCount",
+        "AbsCount",
+    ] {
+        if let Some(v) = extract_xml_tag_value(&text, k) {
+            out.insert(k.to_string(), v);
+        }
+    }
+
+    Ok(out)
+}
 
 // AVTransport服务URN
 const AV_TRANSPORT: URN = URN::service("schemas-upnp-org", "AVTransport", 1);
@@ -130,22 +337,29 @@ impl DlnaController {
         // let media_url = "https://cn-jsnt-ct-01-06.bilivideo.com/upgcxcode/95/66/65166695/65166695-1-208.mp4?e=ig8euxZM2rNcNbN3hwdVhwdlhb4VhwdVhoNvNC8BqJIzNbfq9rVEuxTEnE8L5F6VnEsSTx0vkX8fqJeYTj_lta53NCM=&platform=html5&oi=1696788563&trid=0000552b5f27ec06482cbd0f902c89beadeT&mid=483794508&nbs=1&os=bcache&uipk=5&deadline=1768072065&gen=playurlv3&og=hw&upsig=40d24fb953240187eb8a621ba81a3085&uparams=e,platform,oi,trid,mid,nbs,os,uipk,deadline,gen,og&cdnid=4284&bvc=vod&nettype=0&bw=2247418&agrr=0&buvid=&build=0&dl=0&f=T_0_0&mobi_app=&orderid=0,1".to_string();
 
         log::info!("设置媒体URI: {}", media_url);
-        log::debug!("元数据: {}", current_uri_metadata);
+        log::debug!("元数据(传入): {}", current_uri_metadata);
+
+        // If caller didn't provide metadata, generate a minimal DIDL-Lite for compatibility.
+        let metadata = if current_uri_metadata.trim().is_empty() {
+            // Title can be anything; devices often only care about protocolInfo.
+            build_didl_lite_metadata(current_uri, &media_url, None)
+        } else {
+            current_uri_metadata.to_string()
+        };
 
         // 准备SOAP请求参数
         let action = "SetAVTransportURI";
         let args_str = format!(
-            r#"
-            <InstanceID>0</InstanceID>
-            <CurrentURI>{}</CurrentURI>
-            <CurrentURIMetaData>{}</CurrentURIMetaData>
-            "#,
-            media_url, current_uri_metadata
+            "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI><CurrentURIMetaData>{}</CurrentURIMetaData><SourceId></SourceId><ExtendData></ExtendData>",
+            xml_escape(&media_url),
+            metadata
         );
 
-        // 发送SOAP请求 - 使用device.url()而不是service.url()
-        let device_url = device.device.url();
-        let response = avtransport.action(device_url, action, &args_str).await?;
+        // 发送SOAP请求 - 统一使用设备描述文档URL(location)作为base url
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, &args_str);
+    // Workaround for devices whose controlURL lacks a leading slash.
+    let response = avtransport_action_compat(&base_url, action, &args_str).await?;
 
         log::debug!("SetAVTransportURI响应: {:?}", response);
 
@@ -167,17 +381,21 @@ impl DlnaController {
 
         let action = "SetNextAVTransportURI";
         let media_url = format!("http://{}:{}/{}", server_ip, server_port, next_uri);
+        let metadata = if next_uri_metadata.trim().is_empty() {
+            build_didl_lite_metadata(next_uri, &media_url, None)
+        } else {
+            next_uri_metadata.to_string()
+        };
+
         let args_str = format!(
-            r#"
-            <InstanceID>0</InstanceID>
-            <NextURI>{}</NextURI>
-            <NextURIMetaData>{}</NextURIMetaData>
-            "#,
-            media_url, next_uri_metadata
+            "<InstanceID>0</InstanceID><NextURI>{}</NextURI><NextURIMetaData>{}</NextURIMetaData>",
+            xml_escape(&media_url),
+            metadata
         );
 
-        let device_url = device.device.url();
-        let response = avtransport.action(device_url, action, &args_str).await?;
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, &args_str);
+    let response = avtransport_action_compat(&base_url, action, &args_str).await?;
 
         log::debug!("SetNextAVTransportURI响应: {:?}", response);
 
@@ -190,14 +408,13 @@ impl DlnaController {
             .get_avtransport_service(device)
             .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
+        log::info!("正在发送Play指令...");
         let action = "Play";
-        let args_str = r#"
-            <InstanceID>0</InstanceID>
-            <Speed>1</Speed>
-            "#;
+        let args_str = "<InstanceID>0</InstanceID><Speed>1</Speed>";
 
-        let device_url = device.device.url();
-        let response = avtransport.action(device_url, action, &args_str).await?;
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, args_str);
+    let response = avtransport_action_compat(&base_url, action, args_str).await?;
         log::debug!("Play响应: {:?}", response);
 
         Ok(())
@@ -209,11 +426,13 @@ impl DlnaController {
             .get_avtransport_service(device)
             .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
+        log::info!("正在发送Pause指令...");
         let action = "Pause";
         let args_str = "<InstanceID>0</InstanceID>";
 
-        let device_url = device.device.url();
-        let response = avtransport.action(device_url, action, &args_str).await?;
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, args_str);
+    let response = avtransport_action_compat(&base_url, action, args_str).await?;
         log::debug!("Pause响应: {:?}", response);
 
         Ok(())
@@ -225,11 +444,13 @@ impl DlnaController {
             .get_avtransport_service(device)
             .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
 
+        log::info!("正在发送Stop指令...");
         let action = "Stop";
         let args_str = "<InstanceID>0</InstanceID>";
 
-        let device_url = device.device.url();
-        let response = avtransport.action(device_url, action, &args_str).await?;
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, args_str);
+    let response = avtransport_action_compat(&base_url, action, args_str).await?;
         log::debug!("Stop响应: {:?}", response);
 
         Ok(())
@@ -244,8 +465,9 @@ impl DlnaController {
         let action = "Next";
         let args_str = "<InstanceID>0</InstanceID>";
 
-        let device_url = device.device.url();
-        let response = avtransport.action(device_url, action, &args_str).await?;
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, args_str);
+    let response = avtransport_action_compat(&base_url, action, args_str).await?;
         log::debug!("Next响应: {:?}", response);
 
         Ok(())
@@ -260,8 +482,9 @@ impl DlnaController {
         let action = "GetTransportInfo";
         let args_str = "<InstanceID>0</InstanceID>";
 
-        let device_url = device.device.url();
-        let response = avtransport.action(device_url, action, &args_str).await?;
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, args_str);
+    let response = avtransport_action_compat(&base_url, action, args_str).await?;
         log::debug!("传输信息: {:?}", response);
 
         Ok(())
@@ -279,8 +502,11 @@ impl DlnaController {
         let action = "GetPositionInfo";
         let args_str = "<InstanceID>0</InstanceID>";
 
-        let device_url = device.device.url();
-        let response = avtransport.action(device_url, action, &args_str).await?;
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, args_str);
+    let response = avtransport_action_compat(&base_url, action, args_str).await?;
+
+        log::debug!("GetPositionInfo parsed => {:?}", response);
 
         // 解析响应
         let mut result = HashMap::new();
@@ -298,22 +524,30 @@ impl DlnaController {
         // 获取相对时间
         let default_time = "00:00:00".to_string();
         let rel_time = position_info.get("RelTime").unwrap_or(&default_time);
-        let duration = position_info.get("TrackDuration").unwrap_or(&default_time);
+        let duration = position_info
+            .get("TrackDuration")
+            .or_else(|| position_info.get("AbsTime"))
+            .unwrap_or(&default_time);
         log::debug!(
             "get_secs() : RelTime: {}, TrackDuration: {}",
             rel_time,
             duration
         );
 
+        // Some renderers return NOT_IMPLEMENTED / 00:00:00; treat as unknown.
+        if is_unknown_time(rel_time) || is_unknown_time(duration) {
+            return Ok((0, 0));
+        }
+
         let track_duration = NaiveTime::parse_from_str(duration, "%H:%M:%S")
-            .map_err(|e| rupnp::Error::ParseError("无法解析TrackDuration"))?;
+            .map_err(|_| rupnp::Error::ParseError("无法解析TrackDuration"))?;
         let current_time = NaiveTime::parse_from_str(rel_time, "%H:%M:%S")
-            .map_err(|e| rupnp::Error::ParseError("无法解析RelTime"))?;
+            .map_err(|_| rupnp::Error::ParseError("无法解析RelTime"))?;
 
         let remaining_time = track_duration - current_time;
 
-        let remaining_secs = remaining_time.num_seconds() as u32;
-        let total_secs = track_duration.second();
+        let remaining_secs = remaining_time.num_seconds().max(0) as u32;
+        let total_secs = track_duration.num_seconds_from_midnight();
 
         Ok((remaining_secs, total_secs))
     }
@@ -337,10 +571,30 @@ impl DlnaController {
             volume
         );
 
-        let device_url = device.device.url();
-        let response = rendering_control
-            .action(device_url, action, &args_str)
-            .await?;
+        let base_url = device_location_uri(device)?;
+        // RenderingControl uses a different service; still log with a reasonable SOAPAction.
+        log::info!(
+            "UPnP Action -> base_url={} service_id={} service_type={} SOAPAction=\"urn:schemas-upnp-org:service:RenderingControl:1#{}\"",
+            base_url,
+            rendering_control.service_id(),
+            rendering_control.service_type(),
+            action
+        );
+        log::debug!(
+            "UPnP Action body (approx) => {}",
+            format!(
+                r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">
+  <s:Body>
+    <u:{action} xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\">{args}</u:{action}>
+  </s:Body>
+</s:Envelope>"#,
+                action = action,
+                args = args_str
+            )
+        );
+
+        let response = rendering_control.action(&base_url, action, &args_str).await?;
         log::debug!("SetVolume响应: {:?}", response);
 
         Ok(())
@@ -361,10 +615,29 @@ impl DlnaController {
             <Channel>Master</Channel>
             "#;
 
-        let device_url = device.device.url();
-        let response = rendering_control
-            .action(device_url, action, &args_str)
-            .await?;
+        let base_url = device_location_uri(device)?;
+        log::info!(
+            "UPnP Action -> base_url={} service_id={} service_type={} SOAPAction=\"urn:schemas-upnp-org:service:RenderingControl:1#{}\"",
+            base_url,
+            rendering_control.service_id(),
+            rendering_control.service_type(),
+            action
+        );
+        log::debug!(
+            "UPnP Action body (approx) => {}",
+            format!(
+                r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">
+  <s:Body>
+    <u:{action} xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\">{args}</u:{action}>
+  </s:Body>
+</s:Envelope>"#,
+                action = action,
+                args = args_str
+            )
+        );
+
+        let response = rendering_control.action(&base_url, action, &args_str).await?;
 
         // 解析音量值
         let default_volume = "0".to_string();
