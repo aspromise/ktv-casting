@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde_json::Value;
+use log::warn;
 
 /// 获取BiliBili视频直链
 ///
@@ -11,11 +12,12 @@ use serde_json::Value;
 /// * `Result<String, String>` - 返回直链URL或错误信息
 pub async fn get_bilibili_direct_link(bv_id: &str, page: Option<u32>) -> Result<String, String> {
     let client = Client::new();
-    let page = page.unwrap_or(1);
+    let mut page = page.unwrap_or(1);
 
     // Page is 1-based for bilibili APIs. Guard against 0 to avoid (page - 1) underflow.
     if page == 0 {
-        return Err("无效的分P: page 必须从 1 开始".to_string());
+        warn!("Invalid page number: page must start from 1. Defaulting to page 1.");
+        page = 1;
     }
 
     // 第一步：获取CID

@@ -9,6 +9,22 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
 
+fn extract_xml_tag_value(xml: &str, tag: &str) -> Option<String> {
+    // Best-effort extraction for simple SOAP responses.
+    // Works for patterns like: <RelTime>00:00:12</RelTime>
+    // (No full XML parsing; enough for common DLNA renderers.)
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].trim().to_string())
+}
+
+fn is_unknown_time(s: &str) -> bool {
+    let t = s.trim();
+    t.is_empty() || t == "00:00:00" || t.eq_ignore_ascii_case("NOT_IMPLEMENTED")
+}
+
 fn xml_escape(s: &str) -> String {
     // Minimal XML escaping for element text nodes.
     // (Enough to keep SOAP XML well-formed when URLs contain & and friends.)
@@ -173,10 +189,30 @@ async fn avtransport_action_compat(
         )));
     }
 
-    // For now we only need a success/failure signal for this renderer.
-    // If you later need response fields, we can add an XML parser crate explicitly.
+    // Parse a few common fields from SOAP response so callers like GetPositionInfo work.
+    // This keeps dependencies minimal; if you need robust parsing later, we can introduce
+    // an XML crate and parse properly.
     log::debug!("UPnP Action (compat) status=200 body={}", text);
-    Ok(HashMap::new())
+
+    let mut out = HashMap::new();
+
+    // AVTransport:GetPositionInfo common fields
+    for k in [
+        "Track",
+        "TrackDuration",
+        "TrackMetaData",
+        "TrackURI",
+        "RelTime",
+        "AbsTime",
+        "RelCount",
+        "AbsCount",
+    ] {
+        if let Some(v) = extract_xml_tag_value(&text, k) {
+            out.insert(k.to_string(), v);
+        }
+    }
+
+    Ok(out)
 }
 
 // AVTransport服务URN
@@ -470,6 +506,8 @@ impl DlnaController {
         log_upnp_action(avtransport, &base_url, action, args_str);
     let response = avtransport_action_compat(&base_url, action, args_str).await?;
 
+        log::debug!("GetPositionInfo parsed => {:?}", response);
+
         // 解析响应
         let mut result = HashMap::new();
         for (key, value) in response {
@@ -486,12 +524,20 @@ impl DlnaController {
         // 获取相对时间
         let default_time = "00:00:00".to_string();
         let rel_time = position_info.get("RelTime").unwrap_or(&default_time);
-        let duration = position_info.get("TrackDuration").unwrap_or(&default_time);
+        let duration = position_info
+            .get("TrackDuration")
+            .or_else(|| position_info.get("AbsTime"))
+            .unwrap_or(&default_time);
         log::debug!(
             "get_secs() : RelTime: {}, TrackDuration: {}",
             rel_time,
             duration
         );
+
+        // Some renderers return NOT_IMPLEMENTED / 00:00:00; treat as unknown.
+        if is_unknown_time(rel_time) || is_unknown_time(duration) {
+            return Ok((0, 0));
+        }
 
         let track_duration = NaiveTime::parse_from_str(duration, "%H:%M:%S")
             .map_err(|_| rupnp::Error::ParseError("无法解析TrackDuration"))?;
@@ -500,8 +546,8 @@ impl DlnaController {
 
         let remaining_time = track_duration - current_time;
 
-        let remaining_secs = remaining_time.num_seconds() as u32;
-        let total_secs = track_duration.second();
+        let remaining_secs = remaining_time.num_seconds().max(0) as u32;
+        let total_secs = track_duration.num_seconds_from_midnight();
 
         Ok((remaining_secs, total_secs))
     }

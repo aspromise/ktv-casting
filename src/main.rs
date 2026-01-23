@@ -247,6 +247,10 @@ async fn main() -> Result<()> {
                 match controller.get_secs(&device_cloned).await {
                     Ok(result) => {
                         (remaining_secs, total_secs) = result;
+                        info!(
+                            "获取播放进度成功，剩余时间{}秒，总时间{}秒",
+                            remaining_secs, total_secs
+                        );
                         break;
                     }
                     Err(e) => {
