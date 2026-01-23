@@ -2,6 +2,25 @@
 name = "ktv-casting"
 version = "0.1.0"
 edition = "2024"
+default-run = "ktv-casting"
+
+[[bin]]
+name = "ktv-casting"
+path = "src/main.rs"
+# 设置为默认二进制，这样执行 cargo run 时会直接运行这个
+required-features = []
+
+[[bin]]
+name = "check_rupnp"
+path = "check_rupnp.rs"
+required-features = ["check-rupnp"]
+
+[features]
+# 默认功能集合
+default = []
+
+# 用于编译 check_rupnp 二进制的功能
+check-rupnp = []
 
 [dependencies]
 actix-files = "0.6.9"
