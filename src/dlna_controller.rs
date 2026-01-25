@@ -336,12 +336,27 @@ impl DlnaController {
     pub async fn discover_devices(&self) -> Result<Vec<DlnaDevice>, rupnp::Error> {
         log::info!("正在搜索DLNA设备...");
 
-        // 使用正确的SearchTarget构造方法 - 搜索AVTransport服务
-        let search_target = SearchTarget::URN(AV_TRANSPORT);
+        // 搜索所有设备，而不仅仅是AVTransport服务
+        // 使用upnp:all作为搜索目标，这与命令行工具保持一致
+        let search_target = SearchTarget::All;
         let devices_stream = rupnp::discover(&search_target, Duration::from_secs(5), None).await?;
 
-        // 将Stream转换为Vec
-        let devices: Vec<Result<Device, rupnp::Error>> = devices_stream.collect().await;
+        // 使用超时来收集设备，避免无限期等待
+        let devices_result = tokio::time::timeout(
+            Duration::from_secs(7), // 总超时时间比搜索时间稍长
+            devices_stream.collect::<Vec<_>>()
+        ).await;
+
+        let devices = match devices_result {
+            Ok(results) => {
+                log::info!("设备搜索完成，共找到 {} 个响应", results.len());
+                results // 成功收集到设备
+            },
+            Err(_) => {
+                log::warn!("设备搜索超时");
+                Vec::new() // 超时情况下返回空列表
+            }
+        };
 
         let mut dlna_devices = Vec::new();
 
@@ -351,25 +366,37 @@ impl DlnaController {
                     // 检查是否是媒体渲染器设备
                     let device_type_str = device.device_type().to_string();
                     if device_type_str.contains("MediaRenderer") {
-                        let friendly_name = device.friendly_name().to_string();
-                        let location = device.url().to_string();
-
                         // 检查设备是否支持AVTransport服务
-                        let services: Vec<URN> = device
+                        let supports_avtransport = device
                             .services()
                             .iter()
-                            .map(|s| s.service_type().clone())
-                            .collect();
+                            .any(|s| *s.service_type() == AV_TRANSPORT);
 
-                        log::info!("发现设备: {} (位置: {})", friendly_name, location);
-                        log::debug!("支持的服务: {:?}", services);
+                        if supports_avtransport {
+                            let friendly_name = device.friendly_name().to_string();
+                            let location = device.url().to_string();
 
-                        dlna_devices.push(DlnaDevice {
-                            device,
-                            friendly_name,
-                            location,
-                            services,
-                        });
+                            // 获取所有服务
+                            let services: Vec<URN> = device
+                                .services()
+                                .iter()
+                                .map(|s| s.service_type().clone())
+                                .collect();
+
+                            log::info!("发现DLNA设备: {} (位置: {})", friendly_name, location);
+                            log::debug!("支持的服务: {:?}", services);
+
+                            dlna_devices.push(DlnaDevice {
+                                device,
+                                friendly_name,
+                                location,
+                                services,
+                            });
+                        } else {
+                            log::debug!("设备 {} 不支持AVTransport服务，跳过", device.friendly_name());
+                        }
+                    } else {
+                        log::debug!("设备 {} 不是媒体渲染器，跳过: {}", device.friendly_name(), device_type_str);
                     }
                 }
                 Err(e) => {
@@ -378,6 +405,7 @@ impl DlnaController {
             }
         }
 
+        log::info!("最终找到 {} 个DLNA设备", dlna_devices.len());
         Ok(dlna_devices)
     }
 
@@ -766,4 +794,50 @@ impl DlnaController {
 
         Ok(volume)
     }
+
+    // 获取播放状态
+    pub async fn get_playback_state(&self, device: &DlnaDevice) -> Result<String, rupnp::Error> {
+        let avtransport = self
+            .get_avtransport_service(device)
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
+
+        let action = "GetTransportInfo";
+        let args_str = "<InstanceID>0</InstanceID>";
+
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, args_str);
+        let response = avtransport_action_compat(avtransport, &base_url, action, args_str).await?;
+
+        // 从响应中获取当前传输状态
+        let transport_state = response
+            .get("CurrentTransportState")
+            .cloned()
+            .unwrap_or_else(|| "UNKNOWN".to_string());
+
+        log::debug!("播放状态: {}", transport_state);
+
+        Ok(transport_state)
+    }
+
+    // 获取媒体信息
+    pub async fn get_media_info(
+        &self,
+        device: &DlnaDevice,
+    ) -> Result<HashMap<String, String>, rupnp::Error> {
+        let avtransport = self
+            .get_avtransport_service(device)
+            .ok_or(rupnp::Error::ParseError("设备不支持AVTransport服务"))?;
+
+        let action = "GetMediaInfo";
+        let args_str = "<InstanceID>0</InstanceID>";
+
+        let base_url = device_location_uri(device)?;
+        log_upnp_action(avtransport, &base_url, action, args_str);
+        let response = avtransport_action_compat(avtransport, &base_url, action, args_str).await?;
+
+        log::debug!("媒体信息: {:?}", response);
+
+        Ok(response)
+    }
+
 }
