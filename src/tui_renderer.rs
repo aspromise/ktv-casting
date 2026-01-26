@@ -408,10 +408,10 @@ fn render_error_view(frame: &mut Frame, area: Rect, error_msg: &str) {
 
 fn render_status_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let (status_text, status_color) = match &app.state {
-        AppState::Startup => ("输入房间链接后按 Enter", COLOR_ACCENT),
-        AppState::SelectDevice => ("↑↓选择设备，Enter确认", COLOR_ACCENT),
-        AppState::Playing => ("Space:暂停 N:下一首 +/-:音量", COLOR_SUCCESS),
-        AppState::Paused => ("Space:播放 N:下一首 +/-:音量", COLOR_WARNING),
+        AppState::Startup => ("输入房间链接后按 Enter | Q:退出", COLOR_ACCENT),
+        AppState::SelectDevice => ("↑↓选择设备，Enter确认 | Q:退出", COLOR_ACCENT),
+        AppState::Playing => ("Space:暂停 N:下一首 +/-:音量 | Q:退出", COLOR_SUCCESS),
+        AppState::Paused => ("Space:播放 N:下一首 +/-:音量 | Q:退出", COLOR_WARNING),
         AppState::Error(_) => ("R:重试 Q:退出", COLOR_ERROR),
     };
 
