@@ -339,14 +339,16 @@ impl DlnaController {
 
         // 搜索所有设备，而不仅仅是AVTransport服务
         // 使用upnp:all作为搜索目标，这与命令行工具保持一致
-        let search_target = SearchTarget::All;
-        let devices_stream = match rupnp::discover(&search_target, Duration::from_secs(3), None).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                log::error!("设备搜索启动失败: {}", e);
-                return Err(e);
-            }
-        };
+        const AV_TRANSPORT: URN = URN::service("schemas-upnp-org", "AVTransport", 1);
+        let search_target = SearchTarget::URN(AV_TRANSPORT);
+        let devices_stream =
+            match rupnp::discover(&search_target, Duration::from_secs(3), None).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    log::error!("设备搜索启动失败: {}", e);
+                    return Err(e);
+                }
+            };
 
         // 使用与 check_rupnp 相同的收集方式
         let devices: Vec<_> = devices_stream.collect().await;
@@ -360,7 +362,11 @@ impl DlnaController {
                 Ok(device) => {
                     // 检查是否是媒体渲染器设备
                     let device_type_str = device.device_type().to_string();
-                    log::debug!("发现设备: {} (类型: {})", device.friendly_name(), device_type_str);
+                    log::debug!(
+                        "发现设备: {} (类型: {})",
+                        device.friendly_name(),
+                        device_type_str
+                    );
                     if device_type_str.contains("MediaRenderer") {
                         // 检查设备是否支持AVTransport服务
                         let supports_avtransport = device
@@ -394,10 +400,17 @@ impl DlnaController {
                                 services,
                             });
                         } else {
-                            log::debug!("设备 {} 不支持AVTransport服务，跳过", device.friendly_name());
+                            log::debug!(
+                                "设备 {} 不支持AVTransport服务，跳过",
+                                device.friendly_name()
+                            );
                         }
                     } else {
-                        log::debug!("设备 {} 不是媒体渲染器，跳过: {}", device.friendly_name(), device_type_str);
+                        log::debug!(
+                            "设备 {} 不是媒体渲染器，跳过: {}",
+                            device.friendly_name(),
+                            device_type_str
+                        );
                     }
                 }
                 Err(e) => {
@@ -840,5 +853,4 @@ impl DlnaController {
 
         Ok(response)
     }
-
 }

@@ -6,6 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
+use crate::messages::Message;
+use tokio::sync::mpsc::UnboundedSender;
+
 #[derive(Clone)]
 pub struct PlaylistManager {
     url: String,
@@ -13,16 +16,18 @@ pub struct PlaylistManager {
     hash: Arc<Mutex<Option<String>>>,
     playlist: Arc<Mutex<Vec<String>>>,
     song_playing: Arc<Mutex<Option<String>>>,
+    tx: Option<UnboundedSender<Message>>,
 }
 
 impl PlaylistManager {
-    pub fn new(url: &str, room_id: u64, playlist: Arc<Mutex<Vec<String>>>) -> Self {
+    pub fn new(url: &str, room_id: u64, playlist: Arc<Mutex<Vec<String>>>, tx: Option<UnboundedSender<Message>>) -> Self {
         Self {
             url: url.to_string(),
             room_id,
             hash: Arc::new(Mutex::new(None)),
             playlist,
             song_playing: Arc::new(Mutex::new(None)),
+            tx,
         }
     }
 
@@ -140,6 +145,7 @@ impl PlaylistManager {
         F: Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static,
     {
         let mut self_clone = self.clone();
+        let tx = self.tx.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
             let mut song_playing: Option<String> = None;
@@ -149,6 +155,17 @@ impl PlaylistManager {
                     Err(e) => error!("定时更新播放列表失败: {}", e),
                     Ok(song_playing_new) => {
                         if song_playing_new != song_playing {
+                            // 发送CurrentSong消息更新UI
+                            if let Some(ref tx) = tx {
+                                if let Some(ref song) = song_playing_new {
+                                    // 从URL中提取歌曲名称（BV号）
+                                    let song_name = song.split('-').next().unwrap_or(song);
+                                    let _ = tx.send(Message::CurrentSong(song_name.to_string()));
+                                } else {
+                                    let _ = tx.send(Message::CurrentSong(String::from("无")));
+                                }
+                            }
+                            
                             if let Some(url) = song_playing_new.clone() {
                                 f_on_update(url).await; // await the future
                             }

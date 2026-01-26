@@ -26,3 +26,16 @@ chmod +x ktv-casting-aarch64-linux-android
 ./ktv-casting-aarch64-linux-android
 ```
 
+## 保存日志
+
+默认情况下，程序不会保存日志文件。如果需要保存日志，请设置环境变量`KTV_LOG`为`true`，这将在运行目录下生成`ktv-casting.log`日志文件。
+
+Linux中设置方法如下：
+```bash
+export KTV_LOG=true
+```
+
+Windows中设置方法如下：
+```powershell
+$env:KTV_LOG="true"
+```

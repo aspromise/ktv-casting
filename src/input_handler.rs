@@ -42,11 +42,7 @@ fn handle_startup_events(
                 // 解析房间链接
                 if let Ok(parsed_url) = url::Url::parse(app.room_input.value()) {
                     if let Some(host) = parsed_url.host_str() {
-                        let base_url = format!(
-                            "{}://{}",
-                            parsed_url.scheme(),
-                            host
-                        );
+                        let base_url = format!("{}://{}", parsed_url.scheme(), host);
 
                         let segments: Vec<&str> = parsed_url
                             .path_segments()
@@ -151,10 +147,6 @@ fn handle_player_events(
             app.next_track();
             // 发送下一首歌曲的消息
             let _ = tx.send(Message::NextTrack);
-        }
-        KeyCode::Char('p') | KeyCode::Char('P') => {
-            // P键：上一首
-            // 注意：在当前实现中，我们只支持下一首功能，因为原项目中主要是自动切歌
         }
         KeyCode::Char('+') | KeyCode::Char('=') => {
             // +/=键：增加音量

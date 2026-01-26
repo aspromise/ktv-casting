@@ -1,17 +1,18 @@
 use crate::dlna_controller::DlnaController;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::Local;
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use log::{error, info, warn, LevelFilter};
+use env_logger;
+use log::{LevelFilter, error, info, warn};
 use playlist_manager::PlaylistManager;
 use ratatui::Terminal;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 mod bilibili_parser;
 mod dlna_controller;
@@ -56,37 +57,61 @@ impl log::Log for FileLogger {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe {
-            std::env::set_var("RUST_LOG", "INFO");
+    // 检查环境变量KTV_LOG是否设置为true来决定是否启用文件日志
+    let enable_file_log = std::env::var("KTV_LOG")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    let log_file: Option<Arc<StdMutex<std::fs::File>>> = if enable_file_log {
+        if std::env::var("RUST_LOG").is_err() {
+            unsafe {
+                std::env::set_var("RUST_LOG", "INFO");
+            }
         }
-    }
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("ktv-casting.log")?;
-    let log_file = Arc::new(StdMutex::new(log_file));
-    if let Ok(mut file) = log_file.lock() {
-        let now = Local::now().format("%Y-%m-%d %H:%M:%S");
-        let _ = writeln!(file, "{} [INFO] 日志启动", now);
-        let _ = file.flush();
-    }
-    let panic_log = Arc::clone(&log_file);
-    std::panic::set_hook(Box::new(move |info| {
-        if let Ok(mut file) = panic_log.lock() {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("ktv-casting.log")?;
+        let file = Arc::new(StdMutex::new(file));
+        if let Ok(mut file) = file.lock() {
             let now = Local::now().format("%Y-%m-%d %H:%M:%S");
-            let _ = writeln!(file, "{} [PANIC] {}", now, info);
+            let _ = writeln!(file, "{} [INFO] 日志启动", now);
             let _ = file.flush();
         }
-    }));
-
-    let logger = FileLogger {
-        file: Arc::clone(&log_file),
-        level: LevelFilter::Info,
+        Some(file)
+    } else {
+        unsafe {
+            std::env::set_var("RUST_LOG", "off");
+        }
+        None
     };
-    log::set_boxed_logger(Box::new(logger)).map_err(|e| anyhow!(e))?;
-    log::set_max_level(LevelFilter::Info);
-    info!("日志初始化完成");
+
+    // 设置panic钩子
+    if let Some(ref panic_log) = log_file {
+        let panic_log = Arc::clone(panic_log);
+        std::panic::set_hook(Box::new(move |info| {
+            if let Ok(mut file) = panic_log.lock() {
+                let now = Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(file, "{} [PANIC] {}", now, info);
+                let _ = file.flush();
+            }
+        }));
+    }
+
+    // 配置日志记录器
+    if let Some(ref logger_file) = log_file {
+        let logger = FileLogger {
+            file: Arc::clone(logger_file),
+            level: LevelFilter::Info,
+        };
+        log::set_boxed_logger(Box::new(logger)).map_err(|e| anyhow!(e))?;
+        log::set_max_level(LevelFilter::Info);
+        info!("日志初始化完成");
+    } else {
+        // 如果不启用文件日志，使用默认的控制台日志
+        env_logger::init();
+        info!("控制台日志初始化完成");
+    }
 
     // 初始化终端
     enable_raw_mode()?;
@@ -104,6 +129,7 @@ async fn main() -> Result<()> {
     // 创建DLNA控制器和播放列表管理器
     let controller = DlnaController::new();
     let playlist: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+    let mut active_playlist_manager: Option<PlaylistManager> = None;
 
     // 主循环
     let mut should_quit = false;
@@ -150,26 +176,38 @@ async fn main() -> Result<()> {
                 }
                 Message::NextTrack => {
                     // 处理下一首歌曲请求
-                    if let (Some(room_url), Some(room_id)) = (&app.room_url, app.room_id) {
-                        if let Some(_device) = &app.selected_device {
-                            let mut playlist_manager =
-                                PlaylistManager::new(room_url, room_id, playlist.clone());
-                            tokio::spawn(async move {
+                    if let Some(manager) = active_playlist_manager.clone() {
+                        let mut playlist_manager = manager;
+                        tokio::spawn(async move {
+                            loop {
                                 match playlist_manager.next_song().await {
-                                    Ok(_) => info!("切歌成功"),
-                                    Err(e) => error!("切歌失败: {}", e),
+                                    Ok(_) => {
+                                        info!("切歌成功");
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        let error_msg = e.to_string();
+                                        error!("切歌失败: {}，500ms后重试", error_msg);
+                                        tokio::time::sleep(std::time::Duration::from_millis(500))
+                                            .await;
+                                    }
                                 }
-                            });
-                        }
+                            }
+                        });
                     }
                 }
                 Message::Error(err) => {
                     let err_msg = err.clone();
                     app.update_state(AppState::Error(err));
-                    app.is_loading = false;  // 确保在错误情况下也停止加载状态
+                    app.is_loading = false; // 确保在错误情况下也停止加载状态
                     error!("设备搜索错误: {}", err_msg);
                 }
             }
+        }
+
+        // 离开播放状态时清理播放列表管理器
+        if !matches!(app.state, AppState::Playing | AppState::Paused) {
+            active_playlist_manager = None;
         }
 
         // 根据应用状态执行相应操作
@@ -203,8 +241,7 @@ async fn main() -> Result<()> {
                             }
                             Err(e) => {
                                 error!("设备搜索任务失败: {}", e);
-                                let _ = tx_clone
-                                    .send(Message::DevicesFound(vec![]));
+                                let _ = tx_clone.send(Message::DevicesFound(vec![]));
                                 let _ = tx_clone
                                     .send(Message::Error(format!("搜索DLNA设备失败: {}", e)));
                             }
@@ -217,16 +254,12 @@ async fn main() -> Result<()> {
                 if let (Some(room_url), Some(room_id)) = (&app.room_url, app.room_id) {
                     if app.selected_device.is_some() && !app.playback_tasks_started {
                         app.playback_tasks_started = true;
-                        let playlist_manager =
-                            PlaylistManager::new(room_url, room_id, playlist.clone());
+                        let tx_clone = tx.clone();
+                        let playlist_manager = 
+                            PlaylistManager::new(room_url, room_id, playlist.clone(), Some(tx_clone.clone()));
+                        active_playlist_manager = Some(playlist_manager.clone());
                         let controller_clone = controller.clone();
                         let device = app.selected_device.as_ref().unwrap().clone();
-                        let tx_clone = tx.clone();
-
-                        // 创建需要在多个任务中使用的克隆值
-                        let room_url_clone = room_url.clone();
-                        let room_id_clone = room_id;
-                        let playlist_clone = playlist.clone();
 
                         // 启动播放列表更新
                         playlist_manager.start_periodic_update(move |url| {
@@ -243,11 +276,11 @@ async fn main() -> Result<()> {
                         let controller_clone = controller.clone();
                         let device = app.selected_device.as_ref().unwrap().clone();
                         let tx_clone = tx.clone();
-                        let mut playlist_manager_for_monitor =
-                            PlaylistManager::new(&room_url_clone, room_id_clone, playlist_clone);
+                        let mut playlist_manager_for_monitor = playlist_manager.clone();
                         tokio::spawn(async move {
                             let mut interval =
                                 tokio::time::interval(std::time::Duration::from_secs(1));
+                            let mut next_cooldown_until = std::time::Instant::now();
                             loop {
                                 interval.tick().await;
                                 match controller_clone.get_secs(&device).await {
@@ -255,17 +288,39 @@ async fn main() -> Result<()> {
                                         let _ = tx_clone
                                             .send(Message::PlaybackProgress(remaining, total));
 
-                                        // 如果快播完了，自动切歌
-                                        if remaining <= 2 && total > 0 {
+                                        // 如果快播完了，自动切歌（带冷却）
+                                        if remaining <= 2
+                                            && total > 0
+                                            && std::time::Instant::now() >= next_cooldown_until
+                                        {
                                             info!(
                                                 "剩余时间{}秒，总时间{}秒，准备切歌",
                                                 remaining, total
                                             );
 
-                                            // 发起切歌请求
-                                            match playlist_manager_for_monitor.next_song().await {
-                                                Ok(_) => info!("切歌请求已发送"),
-                                                Err(e) => error!("切歌失败: {}", e),
+                                            // 重试next_song
+                                            loop {
+                                                match playlist_manager_for_monitor.next_song().await
+                                                {
+                                                    Ok(_) => {
+                                                        info!("切歌成功");
+                                                        next_cooldown_until =
+                                                            std::time::Instant::now()
+                                                                + std::time::Duration::from_secs(5);
+                                                        break;
+                                                    }
+                                                    Err(e) => {
+                                                        let error_msg = e.to_string();
+                                                        error!(
+                                                            "切歌失败: {}，500ms后重试",
+                                                            error_msg
+                                                        );
+                                                        tokio::time::sleep(
+                                                            std::time::Duration::from_millis(500),
+                                                        )
+                                                        .await;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
