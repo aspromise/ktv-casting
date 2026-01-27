@@ -141,6 +141,18 @@ async fn avtransport_action_compat(
             return Ok(response);
         }
         Err(e) => {
+            let error_msg = format!("{}", e);
+            let error_code: Option<u32> = error_msg
+                .split(|c: char| !c.is_numeric())
+                .find(|s| s.len() == 3)
+                .and_then(|s| s.parse().ok());
+            
+            if let Some(code) = error_code && code / 100 == 5 {
+                // 5xx错误码直接返回，不执行兼容代码
+                log::warn!("UPnP Action (native) failed with 5xx error: {}, returning directly", e);
+                return Err(e);
+            }
+            
             log::warn!(
                 "UPnP Action (native) failed: {}, trying compatibility mode",
                 e
