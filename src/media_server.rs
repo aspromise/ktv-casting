@@ -1,5 +1,7 @@
 // 使用示例
+use crate::SharedState;
 use crate::bilibili_parser::get_bilibili_direct_link;
+use crate::mp4_util::get_mp4_duration;
 use actix_web::{HttpRequest, HttpResponse, get, web};
 use futures_util::StreamExt;
 use log::info;
@@ -9,6 +11,7 @@ pub async fn proxy_handler(
     req: HttpRequest,
     path: web::Path<(String,)>,
     client: web::Data<reqwest::Client>,
+    shared_state: web::Data<SharedState>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let (origin_url,) = path.into_inner();
     let range_hdr = req
@@ -45,6 +48,35 @@ pub async fn proxy_handler(
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
     info!("Proxy resolved target_url={}", target_url);
+
+    // 异步获取视频时长并存入缓存
+    let duration_cache = shared_state.duration_cache.clone();
+    let origin_url_clone = origin_url.clone();
+    let target_url_clone = target_url.clone();
+    tokio::spawn(async move {
+        // 先检查缓存中是否已有该视频的时长
+        {
+            let cache = duration_cache.lock().await;
+            if cache.contains_key(&origin_url_clone) {
+                return;
+            }
+        }
+
+        match get_mp4_duration(&target_url_clone).await {
+            Ok(duration) => {
+                let mut cache = duration_cache.lock().await;
+                cache.insert(origin_url_clone, duration.as_secs() as u32);
+                info!(
+                    "成功获取并缓存视频时长: {} -> {}s",
+                    target_url_clone,
+                    duration.as_secs()
+                );
+            }
+            Err(e) => {
+                log::warn!("无法获取视频时长: {}", e);
+            }
+        }
+    });
 
     // DLNA renderers often probe with HEAD and/or send Range requests.
     let mut upstream = match *req.method() {

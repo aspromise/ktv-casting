@@ -31,11 +31,6 @@ fn extract_xml_tag_value(xml: &str, tag: &str) -> Option<String> {
     None
 }
 
-fn is_unknown_time(s: &str) -> bool {
-    let t = s.trim();
-    t.is_empty() || t == "00:00:00" || t == "0:00:00" || t.eq_ignore_ascii_case("NOT_IMPLEMENTED")
-}
-
 fn xml_escape(s: &str) -> String {
     // Minimal XML escaping for element text nodes.
     // (Enough to keep SOAP XML well-formed when URLs contain & and friends.)
@@ -607,7 +602,7 @@ impl DlnaController {
         Ok(response)
     }
 
-    // 获取当前播放位置（秒）
+    // 获取当前播放进度，返回 (当前时间秒, 总时长秒)
     pub async fn get_secs(&self, device: &DlnaDevice) -> Result<(u32, u32), rupnp::Error> {
         let position_info = self.get_position_info(device).await?;
 
@@ -659,20 +654,15 @@ impl DlnaController {
             Err(rupnp::Error::ParseError("无法解析时间字符串"))
         }
 
-        // Some renderers return NOT_IMPLEMENTED / 00:00:00; treat as unknown.
-        if is_unknown_time(rel_time) || is_unknown_time(duration) {
-            return Ok((0, 0));
-        }
+        let current_time =
+            parse_time_str(rel_time).unwrap_or_else(|_| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        let total_time =
+            parse_time_str(duration).unwrap_or_else(|_| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
 
-        let track_duration = parse_time_str(duration)?;
-        let current_time = parse_time_str(rel_time)?;
+        let current_secs = current_time.num_seconds_from_midnight();
+        let total_secs = total_time.num_seconds_from_midnight();
 
-        let remaining_time = track_duration - current_time;
-
-        let remaining_secs = remaining_time.num_seconds().max(0) as u32;
-        let total_secs = track_duration.num_seconds_from_midnight();
-
-        Ok((remaining_secs, total_secs))
+        Ok((current_secs, total_secs))
     }
 
     // 设置渲染器音量

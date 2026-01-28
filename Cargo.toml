@@ -35,6 +35,7 @@ reqwest = { version = "0.12.28", default-features = false, features = ["json", "
 rupnp = "3.0.0"
 serde = "1.0.228"
 serde_json = "1.0.149"
+mp4 = "0.14.0"
 tokio = { version = "1.49.0", features = ["full"] }
 url = "2.5.8"
 urlencoding = "2.1.3"

@@ -190,6 +190,10 @@ impl PlaylistManager {
 
         Ok(())
     }
+
+    pub async fn get_song_playing(&self) -> Option<String> {
+        self.song_playing.lock().await.clone()
+    }
 }
 
 #[tokio::test]
