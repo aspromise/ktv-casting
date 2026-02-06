@@ -314,95 +314,15 @@ impl PlaylistManager {
     }
 
     /// 遗留的轮询方法（当WebSocket不可用时使用）
-    pub fn start_periodic_update_legacy<F>(&self, f_on_update: F)
-    where
-        F: Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static,
-    {
+    pub fn start_periodic_update_legacy(&self) {
         let self_clone = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
-            let mut song_playing: Option<String> = None;
             loop {
                 interval.tick().await;
-                match self_clone.fetch_playlist().await {
-                    Err(e) => error!("定时更新播放列表失败: {}", e),
-                    Ok(song_playing_new) => {
-                        if song_playing_new != song_playing {
-                            if let Some(url) = song_playing_new.clone() {
-                                f_on_update(url).await;
-                            }
-                            song_playing = song_playing_new;
-                        }
-                    }
-                }
+                self_clone.handle_update().await;
             }
         });
-    }
-
-    /// 旧的fetch_playlist方法（用于轮询模式）
-    async fn fetch_playlist(&self) -> Result<Option<String>, String> {
-        let hash_guard = self.hash.lock().await;
-        let last_hash = hash_guard.clone().unwrap_or("EMPTY_LIST_HASH".to_string());
-        drop(hash_guard);
-
-        let url = format!(
-            "{}/api/songListInfo?roomId={}&lastHash={}",
-            self.url, self.room_id, last_hash
-        );
-
-        debug!("正在获取播放列表: {}", url);
-
-        let resp = self.client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("发送请求失败: {}", e))?;
-        if !resp.status().is_success() {
-            return Err(format!("请求失败，状态码: {}", resp.status()));
-        }
-
-        let resp_json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("解析JSON失败: {}", e))?;
-        let changed: bool = resp_json["changed"].as_bool().unwrap_or(false);
-
-        if !changed {
-            debug!("播放列表未改变，跳过更新");
-            return Ok(self.song_playing.lock().await.clone());
-        }
-
-        // 获取新的 hash 值
-        let new_hash = resp_json["hash"]
-            .as_str()
-            .unwrap_or("EMPTY_LIST_HASH")
-            .to_string();
-
-        // 从 list 对象中提取 sung 数组的最后一项作为当前播放的歌曲
-        let sung_url: Option<String> = if let Some(list_obj) = resp_json["list"].as_object() {
-            if let Some(sung_array) = list_obj.get("sung").and_then(|s| s.as_array()) {
-                sung_array
-                    .last()
-                    .and_then(|item| item["url"].as_str())
-                    .map(extract_bv_id)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // 更新当前歌曲
-        let mut song_playing = self.song_playing.lock().await;
-        *song_playing = sung_url.clone();
-        drop(song_playing);
-
-        // 更新 hash 值
-        let mut hash = self.hash.lock().await;
-        *hash = Some(new_hash);
-        drop(hash);
-
-        Ok(sung_url)
     }
 }
 
