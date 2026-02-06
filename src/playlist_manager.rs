@@ -104,6 +104,12 @@ impl PlaylistManager {
 
         info!("WebSocket连接成功，开始监听消息...");
 
+        let self_for_init = self.clone();
+        tokio::spawn(async move {
+            info!("执行初次同步...");
+            // 触发 HTTP 获取
+            self_for_init.handle_update().await;
+        });
         // 启动消息监听任务
         tokio::spawn(async move {
             Self::message_listener(self, ws_stream).await;
@@ -138,10 +144,15 @@ impl PlaylistManager {
                             // 处理UPDATE消息
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
                                 && let Some(msg_type) = json.get("type").and_then(|t| t.as_str())
-                                    && msg_type == "UPDATE"
-                                        && let Some(hash) = json.get("hash").and_then(|h| h.as_str()) {
-                                            self.handle_update(hash.to_string()).await;
-                                        }
+                                && msg_type == "UPDATE"
+                                && let Some(hash) = json.get("hash").and_then(|h| h.as_str()) {
+                                let old_hash = self.hash.lock().await.clone();
+                                    // 如果hash发生变化，获取当前播放的歌曲
+                                    if old_hash.as_deref() != Some(&hash) {
+                                        info!("检测到歌单更新，hash: {}", hash);
+                                        self.handle_update().await;
+                                }
+                            }
                         }
                         Some(Ok(Message::Ping(data))) => {
                             debug!("收到ping，发送pong");
@@ -190,35 +201,33 @@ impl PlaylistManager {
     }
 
     /// 处理UPDATE消息
-    async fn handle_update(&self, new_hash: String) {
-        let mut hash_guard = self.hash.lock().await;
-        let old_hash = hash_guard.clone();
-        *hash_guard = Some(new_hash.clone());
-        drop(hash_guard);
+    async fn handle_update(&self) {
+        let old_hash = self.hash.lock().await.clone();
 
-        // 如果hash发生变化，获取当前播放的歌曲
-        if old_hash != Some(new_hash.clone()) {
-            info!("检测到歌单更新，hash: {}", new_hash);
-            
-            // 调用HTTP接口获取完整歌单信息
-            if let Ok(Some(song_url)) = self.fetch_current_song_from_hash(&new_hash).await {
-                let mut song_playing = self.song_playing.lock().await;
-                let old_song = song_playing.clone();
-                *song_playing = Some(song_url.clone());
-                drop(song_playing);
+        let last_hash_for_request = old_hash.unwrap_or_else(|| "EMPTY_LIST_HASH".to_string());
+        // 调用HTTP接口获取完整歌单信息
+        if let Ok((Some(song_url), latest_hash)) = self.fetch_current_song_from_hash(&last_hash_for_request).await {
+            let mut song_playing = self.song_playing.lock().await;
+            let old_song = song_playing.clone();
+            *song_playing = Some(song_url.clone());
+            drop(song_playing);
 
-                if old_song != Some(song_url.clone()) {
-                    info!("歌曲已切换为: {}", song_url);
-                    if let Some(callback) = self.on_song_change.lock().await.as_ref() {
-                        callback(song_url);
-                    }
+            // 更新 Hash
+            let mut hash_guard = self.hash.lock().await;
+            *hash_guard = Some(latest_hash);
+            drop(hash_guard);
+
+            if old_song != Some(song_url.clone()) {
+                info!("歌曲已切换为: {}", song_url);
+                if let Some(callback) = self.on_song_change.lock().await.as_ref() {
+                    callback(song_url);
                 }
             }
         }
     }
 
     /// 根据hash获取当前播放的歌曲（通过HTTP接口）
-    async fn fetch_current_song_from_hash(&self, hash: &str) -> Result<Option<String>, String> {
+    async fn fetch_current_song_from_hash(&self, hash: &str) -> Result<(Option<String>, String), String> {
         let url = format!(
             "{}/api/songListInfo?roomId={}&lastHash={}",
             self.url, self.room_id, hash
@@ -241,26 +250,27 @@ impl PlaylistManager {
             .await
             .map_err(|e| format!("解析JSON失败: {}", e))?;
 
+        let latest_hash: String = resp_json["hash"].as_str().map(|s| s.to_string()).unwrap_or_else(|| hash.to_string());
+
         if !resp_json["changed"].as_bool().unwrap_or(false) {
-            return Ok(None);
+            return Ok((None, latest_hash));
         }
 
         // 提取正在演唱的歌曲
-        let sung_url: Option<String> = if let Some(list_array) = resp_json["list"].as_array() {
-            list_array
-                .iter()
-                .rev()
-                .find(|item| {
-                    item.get("state")
-                        .is_some_and(|s| s.as_str().unwrap_or("") == "sung")
-                })
-                .and_then(|item| item["url"].as_str())
-                .map(extract_bv_id)
-        } else {
-            None
-        };
+        let singing_url: Option<String> = resp_json["list"]["singing"]
+            .as_object()
+            .and_then(|_| resp_json["list"]["singing"]["url"].as_str().map(extract_bv_id))
+            .or_else(|| {
+                resp_json["list"]["sung"]
+                    .as_array()
+                    .and_then(|arr| arr.last())
+                    .and_then(|last| last["url"].as_str())
+                    .map(extract_bv_id)
+            });
 
-        Ok(sung_url)
+
+
+        Ok((singing_url, latest_hash))
     }
 
     /// 请求下一首歌曲（HTTP接口）
