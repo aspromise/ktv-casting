@@ -1,8 +1,9 @@
 use crate::dlna_controller::DlnaController;
 use actix_web::{App, HttpServer, web};
 use anyhow::{Context, Result, bail};
+use regex::Regex;
 use local_ip_address::local_ip;
-use log::{error, info};
+use log::{debug, error, info};
 use playlist_manager::PlaylistManager;
 use reqwest::Client;
 use std::io;
@@ -49,17 +50,29 @@ async fn main() -> Result<()> {
     info!("Base URL: {}", base_url);
 
     // ③ 从路径中取最后一段（非空）作为 room_id
-    let segments: Vec<&str> = parsed_url
-        .path_segments()
-        .map(|s| s.filter(|seg| !seg.is_empty()).collect())
-        .unwrap_or_default();
+    // 尝试从不同的地方获取 room_id
+    let room_id_result: Option<String> = {
+        // 优先尝试从查询参数 ?roomId=123 中获取
+        let query_room_id = parsed_url.query_pairs()
+            .find(|(key, _)| key == "roomId")
+            .map(|(_, value)| value.into_owned());
 
-    if segments.is_empty() {
-        error!("错误：没有找到房间号");
-        bail!("No room id")
+        if query_room_id.is_some() {
+            query_room_id
+        } else {
+            // 如果 Query 里没有，回退到原来的路径末尾逻辑
+            parsed_url.path_segments()
+                .and_then(|s| s.filter(|seg| !seg.is_empty()).last())
+                .map(|s| s.to_string())
+        }
+    };
+    // 检查结果
+    let room_str = room_id_result.with_context(|| "URL 中未找到房间号 (roomId 参数或路径末尾)")?;
+    let re = Regex::new(r"^[a-zA-Z0-9_-]{1,20}$")?;
+
+    if !re.is_match(&room_str) {
+        bail!("无效的房间号格式: '{}' (仅限 1-20 位字母、数字、下划线或连字符)", room_str);
     }
-
-    let room_str = segments.last().unwrap();
     let room_id: String = room_str.to_string();
     info!("Parsed room_id: {}", room_id);
 
@@ -120,32 +133,31 @@ async fn main() -> Result<()> {
     // 设置歌曲变化回调（需要克隆controller和device）
     let controller_for_callback = controller.clone();
     let device_for_callback = device.clone();
-    let callback_pm = PlaylistManager::new(&base_url, room_id.clone(), nickname.clone());
-    tokio::spawn(async move {
-        callback_pm.set_on_song_change(move |url| {
-            let controller = controller_for_callback.clone();
-            let device = device_for_callback.clone();
-            tokio::spawn(async move {
-                // 停止当前播放
-                retry_until_success("停止播放", 500, || async {
-                    controller.stop(&device).await.map_err(|e| e.to_string())
-                }).await.ok();
-                
-                // 设置AVTransport URI
-                retry_until_success("设置AVTransport URI", 500, || async {
-                    controller
-                        .set_avtransport_uri(&device, &url, "", local_ip, server_port)
-                        .await
-                        .map_err(|e| e.to_string())
-                }).await.ok();
-                
-                // 播放
-                retry_until_success("播放", 500, || async {
-                    controller.play(&device).await.map_err(|e| e.to_string())
-                }).await.ok();
-            });
-        }).await;
-    });
+    let callback_pm = playlist_manager.clone();
+
+    callback_pm.set_on_song_change(move |url| {
+        let controller = controller_for_callback.clone();
+        let device = device_for_callback.clone();
+        tokio::spawn(async move {
+            // 停止当前播放
+            retry_until_success("停止播放", 500, || async {
+                controller.stop(&device).await.map_err(|e| e.to_string())
+            }).await.ok();
+
+            // 设置AVTransport URI
+            retry_until_success("设置AVTransport URI", 500, || async {
+                controller
+                    .set_avtransport_uri(&device, &url, "", local_ip, server_port)
+                    .await
+                    .map_err(|e| e.to_string())
+            }).await.ok();
+
+            // 播放
+            retry_until_success("播放", 500, || async {
+                controller.play(&device).await.map_err(|e| e.to_string())
+            }).await.ok();
+        });
+    }).await;
 
     // 启动WebSocket监听（需要克隆playlist_manager）
     let pm_ws = playlist_manager.clone();
@@ -154,34 +166,10 @@ async fn main() -> Result<()> {
         Err(e) => {
             error!("WebSocket连接失败: {}，将退回到轮询模式", e);
             // 如果WebSocket连接失败，退回到轮询模式
-            let controller_for_poll = controller.clone();
-            let device_for_poll = device.clone();
-            playlist_manager.start_periodic_update_legacy(move |url| {
-                let controller = controller_for_poll.clone();
-                let device = device_for_poll.clone();
-                Box::pin(async move {
-                    // 停止当前播放
-                    retry_until_success("停止播放", 500, || async {
-                        controller.stop(&device).await.map_err(|e| e.to_string())
-                    }).await.ok();
-                    
-                    // 设置AVTransport URI
-                    retry_until_success("设置AVTransport URI", 500, || async {
-                        controller
-                            .set_avtransport_uri(&device, &url, "", local_ip, server_port)
-                            .await
-                            .map_err(|e| e.to_string())
-                    }).await.ok();
-                    
-                    // 播放
-                    retry_until_success("播放", 500, || async {
-                        controller.play(&device).await.map_err(|e| e.to_string())
-                    }).await.ok();
-                })
-            });
+            playlist_manager.start_periodic_update_legacy();
         }
     }
-
+    let pm_for_monitor = playlist_manager.clone();
     tokio::spawn(async move {
         let controller = DlnaController::new();
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -192,7 +180,7 @@ async fn main() -> Result<()> {
 
             // 首先尝试从缓存中获取总长度
             let mut cached_total = 0;
-            if let Some(playing) = playlist_manager.get_song_playing().await {
+            if let Some(playing) = pm_for_monitor.get_song_playing().await {
                 let cache = duration_cache.lock().await;
                 if let Some(&d) = cache.get(&playing) {
                     cached_total = d;
@@ -211,12 +199,12 @@ async fn main() -> Result<()> {
                     // 如果从缓存拿到了长度，
                     if cached_total > 0 {
                         total_secs = cached_total;
-                        info!("使用缓存的视频时长: {}s", total_secs);
+                        debug!("使用缓存的视频时长: {}s", total_secs);
                     }
 
                     let remaining_secs = total_secs.saturating_sub(current_secs);
 
-                    info!(
+                    debug!(
                         "获取播放进度成功，当前时间{}秒，总时间{}秒，剩余时间{}秒",
                         current_secs, total_secs, remaining_secs
                     );
@@ -228,7 +216,7 @@ async fn main() -> Result<()> {
                         );
                         // 重试next_song
                         retry_until_success("下一首歌曲", 500, || async {
-                            playlist_manager.next_song().await.map_err(|e| e.to_string())
+                            pm_for_monitor.next_song().await.map_err(|e| e.to_string())
                         }).await.ok();
                         sleep(Duration::from_secs(5)).await;
                     }
