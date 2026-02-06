@@ -199,12 +199,12 @@ async fn main() -> Result<()> {
                     // 如果从缓存拿到了长度，
                     if cached_total > 0 {
                         total_secs = cached_total;
-                        info!("使用缓存的视频时长: {}s", total_secs);
+                        debug!("使用缓存的视频时长: {}s", total_secs);
                     }
 
                     let remaining_secs = total_secs.saturating_sub(current_secs);
 
-                    info!(
+                    debug!(
                         "获取播放进度成功，当前时间{}秒，总时间{}秒，剩余时间{}秒",
                         current_secs, total_secs, remaining_secs
                     );

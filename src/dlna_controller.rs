@@ -104,7 +104,7 @@ fn log_upnp_action(service: &rupnp::Service, base_url: &Uri, action: &str, args_
     // Logged body is a best-effort “wire-like” payload for diffing.
     let envelope = build_soap_envelope(action, args_xml);
 
-    log::info!(
+    log::debug!(
         "UPnP Action -> base_url={} service_id={} service_type={} SOAPAction={}",
         base_url,
         service.service_id(),
@@ -129,7 +129,7 @@ async fn avtransport_action_compat(
     // 首先尝试使用 rupnp 原生的 action 方法（适用于Windows Media Player等标准设备）
     match service.action(base_url, action, args_xml).await {
         Ok(response) => {
-            log::info!("UPnP Action (native) succeeded");
+            log::debug!("UPnP Action (native) succeeded");
             log::debug!("UPnP Action (native) response: {:?}", response);
             return Ok(response);
         }
@@ -198,7 +198,7 @@ async fn avtransport_action_compat(
             format!("\"urn:schemas-upnp-org:service:AVTransport:1#{}\"", action);
         let body = build_soap_envelope(action, args_xml);
 
-        log::info!(
+        log::debug!(
             "UPnP Action (compat) -> url={} SOAPAction={}",
             final_url,
             soap_action_header
@@ -237,7 +237,7 @@ async fn avtransport_action_compat(
                 })?;
 
                 if status.as_u16() == 200 {
-                    log::info!("UPnP Action (compat) succeeded with path: {}", final_url);
+                    log::debug!("UPnP Action (compat) succeeded with path: {}", final_url);
                     log::debug!("UPnP Action (compat) status=200 body={}", text);
 
                     let mut out = HashMap::new();
